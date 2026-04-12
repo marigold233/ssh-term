@@ -16,7 +16,13 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Build wheels
+      - name: Install maturin
+        run: pip install maturin
+
+      - name: Build local library (.pyd)
+        run: maturin develop --release
+
+      - name: Build distributable wheel (Optional)
         uses: PyO3/maturin-action@v1
         with:
           target: x64
@@ -25,7 +31,7 @@ jobs:
       - name: Upload Windows wheel and library
         uses: actions/upload-artifact@v4
         with:
-          name: windows-pyd
+          name: windows-binaries
           path: |
             dist/*.whl
             src/ssh_term/*.pyd
