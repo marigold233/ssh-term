@@ -20,7 +20,10 @@ jobs:
         run: pip install maturin
 
       - name: Build local library (.pyd)
-        run: maturin develop --release
+        run: |
+          python -m venv .venv
+          .venv\Scripts\activate.ps1
+          maturin develop --release
 
       - name: Build distributable wheel (Optional)
         uses: PyO3/maturin-action@v1
