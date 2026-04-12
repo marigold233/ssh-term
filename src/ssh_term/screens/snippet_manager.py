@@ -105,7 +105,7 @@ class SnippetManagerScreen(Screen):
                 yield Input(id="desc-input", placeholder="Restarts all web containers")
                 
                 yield Label("Content (Bash script or command)", classes="editor-label")
-                yield TextArea(id="content-input")
+                yield TextArea(language="bash", id="content-input")
                 
                 yield Button("Save Snippet", id="btn-save", variant="primary")
         

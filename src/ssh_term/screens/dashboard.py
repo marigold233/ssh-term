@@ -38,6 +38,7 @@ class HintBar(Static):
             f"[bold {err}]\u23ce[/] Connect  "
             f"[bold {err}]f[/] Files  "
             f"[bold {err}]s[/] Snippets  "
+            f"[bold {err}]b[/] Batch  "
             f"[bold {err}]T[/] Theme  "
             f"[bold {err}]q[/] Quit"
         )
@@ -68,7 +69,9 @@ class DashboardScreen(Screen):
         Binding("enter", "connect", "Connect", show=False, priority=True),
         Binding("f", "file_transfer", "File Transfer", show=False, priority=True),
         Binding("s", "manage_snippets", "Snippets", show=False, priority=True),
+        Binding("b", "batch_execute", "Batch Ops", show=False, priority=True),
         Binding("T", "cycle_theme", "Theme", show=False, priority=True),
+        Binding("escape", "back_to_workspace", "Workspace", show=False, priority=True),
         Binding("q", "quit", "Quit", show=False, priority=True),
     ]
 
@@ -94,6 +97,13 @@ class DashboardScreen(Screen):
             return None
         row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
         return row_key.value
+
+    def action_batch_execute(self) -> None:
+        try:
+            from ssh_term.screens.batch_execute import BatchExecuteScreen
+            self.app.push_screen(BatchExecuteScreen())
+        except Exception as e:
+            self.notify(f"Error loading Batch Screen: {e}", severity="error")
 
     def action_add_connection(self) -> None:
         def on_result(conn) -> None:
@@ -197,7 +207,8 @@ class DashboardScreen(Screen):
                 self.notify(f"Connection failed: {e}", severity="error")
                 return
 
-        self.app.notify("File Transfer (SFTP) component not yet implemented. Try using standard scp for now.", title="SFTP")
+        from ssh_term.screens.file_transfer import FileTransferScreen
+        self.app.push_screen(FileTransferScreen(conn))
 
     def action_manage_snippets(self) -> None:
         self.app.switch_screen("snippet_manager")
@@ -208,6 +219,10 @@ class DashboardScreen(Screen):
         self.app.config_manager.theme = new_theme
         self.app.config_manager.save()
         self.query_one(HintBar).refresh_hints()
+
+    def action_back_to_workspace(self) -> None:
+        if self.app.workspace and getattr(self.app.workspace, '_tabs_data', None):
+            self.app.switch_screen("workspace")
 
     def action_quit(self) -> None:
         self.app.exit()

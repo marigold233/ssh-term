@@ -35,6 +35,8 @@ pub struct PyChar {
     pub italics: bool,
     #[pyo3(get)]
     pub underscore: bool,
+    #[pyo3(get)]
+    pub inverse: bool,
 }
 
 impl Default for PyChar {
@@ -46,6 +48,7 @@ impl Default for PyChar {
             bold: false,
             italics: false,
             underscore: false,
+            inverse: false,
         }
     }
 }
@@ -66,6 +69,7 @@ struct CurrentStyle {
     bold: bool,
     italics: bool,
     underscore: bool,
+    inverse: bool,
 }
 
 impl Default for CurrentStyle {
@@ -76,6 +80,7 @@ impl Default for CurrentStyle {
             bold: false,
             italics: false,
             underscore: false,
+            inverse: false,
         }
     }
 }
@@ -137,7 +142,7 @@ impl Screen {
         self.scrollback_buffer.len() + self.lines
     }
 
-    pub fn get_line_segments(&self, y: usize) -> Vec<(String, String, String, bool, bool, bool, bool)> {
+    pub fn get_line_segments(&self, y: usize) -> Vec<(String, String, String, bool, bool, bool, bool, bool)> {
         let mut segments = Vec::new();
         let total = self.scrollback_buffer.len() + self.lines;
         if y >= total {
@@ -161,12 +166,12 @@ impl Screen {
         }
 
         let mut current_text = String::new();
-        let mut current_style: Option<(Color, Color, bool, bool, bool, bool)> = None;
+        let mut current_style: Option<(Color, Color, bool, bool, bool, bool, bool)> = None;
 
         for (x, cell) in row.iter().enumerate() {
             let is_cursor = !in_history && (y - self.scrollback_buffer.len()) == self.cursor.y && x == self.cursor.x;
             
-            let style = (cell.fg, cell.bg, cell.bold, cell.italics, cell.underscore, is_cursor);
+            let style = (cell.fg, cell.bg, cell.bold, cell.italics, cell.underscore, cell.inverse, is_cursor);
 
             if let Some(cs) = current_style {
                 if cs == style {
@@ -180,6 +185,7 @@ impl Screen {
                         cs.3,
                         cs.4,
                         cs.5,
+                        cs.6,
                     ));
                     current_text.clear();
                     current_text.push(cell.data);
@@ -201,6 +207,7 @@ impl Screen {
                     cs.3,
                     cs.4,
                     cs.5,
+                    cs.6,
                 ));
             }
         }
@@ -209,6 +216,18 @@ impl Screen {
 }
 
 impl Screen {
+    fn blank_char(&self) -> PyChar {
+        PyChar {
+            data: ' ',
+            fg: self.current_style.fg,
+            bg: self.current_style.bg,
+            bold: self.current_style.bold,
+            italics: self.current_style.italics,
+            underscore: self.current_style.underscore,
+            inverse: self.current_style.inverse,
+        }
+    }
+
     fn get_margins(&self) -> (usize, usize) {
         if let Some((t, b)) = self.margins {
             (t, std::cmp::min(b, self.lines.saturating_sub(1)))
@@ -226,11 +245,11 @@ impl Screen {
                     self.scrollback_buffer.pop_front();
                 }
             }
-            self.buffer.push_back(vec![PyChar::default(); self.columns]);
+            self.buffer.push_back(vec![self.blank_char(); self.columns]);
         } else {
             if top <= bottom && bottom < self.buffer.len() {
                 self.buffer.remove(top);
-                self.buffer.insert(bottom, vec![PyChar::default(); self.columns]);
+                self.buffer.insert(bottom, vec![self.blank_char(); self.columns]);
             }
         }
     }
@@ -239,7 +258,7 @@ impl Screen {
         let (top, bottom) = self.get_margins();
         if top <= bottom && bottom < self.buffer.len() {
             self.buffer.remove(bottom);
-            self.buffer.insert(top, vec![PyChar::default(); self.columns]);
+            self.buffer.insert(top, vec![self.blank_char(); self.columns]);
         }
     }
 
@@ -267,7 +286,7 @@ impl Screen {
         for _ in 0..count {
             if bottom < self.buffer.len() {
                 self.buffer.remove(bottom);
-                self.buffer.insert(self.cursor.y, vec![PyChar::default(); self.columns]);
+                self.buffer.insert(self.cursor.y, vec![self.blank_char(); self.columns]);
             }
         }
     }
@@ -278,7 +297,7 @@ impl Screen {
         for _ in 0..count {
             if self.cursor.y < self.buffer.len() {
                 self.buffer.remove(self.cursor.y);
-                self.buffer.insert(bottom, vec![PyChar::default(); self.columns]);
+                self.buffer.insert(bottom, vec![self.blank_char(); self.columns]);
             }
         }
     }
@@ -302,6 +321,7 @@ impl Perform for Screen {
                 cell.bold = self.current_style.bold;
                 cell.italics = self.current_style.italics;
                 cell.underscore = self.current_style.underscore;
+                cell.inverse = self.current_style.inverse;
             }
         }
         self.cursor.x += 1;
@@ -375,11 +395,11 @@ impl Perform for Screen {
                     0 => {
                         if cy < self.buffer.len() {
                             for x in cx..self.buffer[cy].len() {
-                                self.buffer[cy][x] = PyChar::default();
+                                self.buffer[cy][x] = self.blank_char();
                             }
                             for y in (cy + 1)..self.buffer.len() {
                                 for x in 0..self.buffer[y].len() {
-                                    self.buffer[y][x] = PyChar::default();
+                                    self.buffer[y][x] = self.blank_char();
                                 }
                             }
                         }
@@ -388,14 +408,14 @@ impl Perform for Screen {
                         for y in 0..cy {
                             if y < self.buffer.len() {
                                 for x in 0..self.buffer[y].len() {
-                                    self.buffer[y][x] = PyChar::default();
+                                    self.buffer[y][x] = self.blank_char();
                                 }
                             }
                         }
                         if cy < self.buffer.len() {
                             for x in 0..=cx {
                                 if x < self.buffer[cy].len() {
-                                    self.buffer[cy][x] = PyChar::default();
+                                    self.buffer[cy][x] = self.blank_char();
                                 }
                             }
                         }
@@ -403,7 +423,7 @@ impl Perform for Screen {
                     2 | 3 => {
                         for y in 0..self.buffer.len() {
                             for x in 0..self.buffer[y].len() {
-                                self.buffer[y][x] = PyChar::default();
+                                self.buffer[y][x] = self.blank_char();
                             }
                         }
                     }
@@ -421,19 +441,19 @@ impl Perform for Screen {
                     match mode {
                         0 => {
                             for x in cx..self.buffer[cy].len() {
-                                self.buffer[cy][x] = PyChar::default();
+                                self.buffer[cy][x] = self.blank_char();
                             }
                         }
                         1 => {
                             for x in 0..=cx {
                                 if x < self.buffer[cy].len() {
-                                    self.buffer[cy][x] = PyChar::default();
+                                    self.buffer[cy][x] = self.blank_char();
                                 }
                             }
                         }
                         2 => {
                             for x in 0..self.buffer[cy].len() {
-                                self.buffer[cy][x] = PyChar::default();
+                                self.buffer[cy][x] = self.blank_char();
                             }
                         }
                         _ => {}
@@ -483,9 +503,11 @@ impl Perform for Screen {
                         1 => self.current_style.bold = true,
                         3 => self.current_style.italics = true,
                         4 => self.current_style.underscore = true,
+                        7 => self.current_style.inverse = true,
                         22 => self.current_style.bold = false,
                         23 => self.current_style.italics = false,
                         24 => self.current_style.underscore = false,
+                        27 => self.current_style.inverse = false,
                         30..=37 => {
                             let colors = ["black", "red", "green", "brown", "blue", "magenta", "cyan", "white"];
                             self.current_style.fg = Color::Named(colors[(code - 30) as usize]);

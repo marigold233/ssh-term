@@ -37,7 +37,7 @@ class WorkspaceScreen(Screen):
 
     BINDINGS = [
         Binding("ctrl+d", "disconnect_tab", "Close Tab", priority=True),
-        Binding("ctrl+p", "search_snippet", "Snippets", priority=True),
+        Binding("alt+p", "search_snippet", "Snippets", priority=True),
         Binding("ctrl+f", "file_transfer", "Files", priority=True),
         Binding("ctrl+b", "back_to_dash", "Dashboard", priority=True),
         Binding("shift+page_up", "scroll_history_up", "Scroll Up", show=False, priority=True),
@@ -143,7 +143,7 @@ class WorkspaceScreen(Screen):
         else:
             status.update(
                 f" {telemetry} | "
-                f"[bold {err}]Ctrl+D[/] Close  [bold {err}]Ctrl+P[/] Snippets  [bold {err}]Ctrl+F[/] Files  [bold {err}]Ctrl+B[/] Dash"
+                f"[bold {err}]Ctrl+D[/] Close  [bold {err}]Alt+P[/] Snippets  [bold {err}]Ctrl+F[/] Files  [bold {err}]Ctrl+B[/] Dash"
             )
 
     @work
@@ -294,11 +294,15 @@ class WorkspaceScreen(Screen):
         return f"CPU: {cpu_usage:.1f}% | Mem: {mem_pct:.1f}% | Disk: {disk_str} | ↓ {rx_rate_str} ↑ {tx_rate_str}"
 
     def on_terminal_emulator_disconnected(self, event) -> None:
-        term = event.control
-        # term.id is "term-{session_id}"
-        session_id = term.id.replace("term-", "") if term.id else None
+        session_id = event.term_id.replace("term-", "") if getattr(event, "term_id", None) else None
         if session_id:
             self._close_session(session_id)
+
+    def on_screen_resume(self, event) -> None:
+        term = self._get_active_terminal()
+        if term:
+            term.refresh()
+            term.focus()
 
     def action_disconnect_tab(self, _conn_id: str = None) -> None:
         """Close the currently active tab/session."""

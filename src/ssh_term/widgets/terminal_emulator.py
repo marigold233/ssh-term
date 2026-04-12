@@ -82,7 +82,9 @@ class TerminalEmulator(Widget, can_focus=True):
     from textual.message import Message
 
     class Disconnected(Message):
-        pass
+        def __init__(self, term_id: str) -> None:
+            super().__init__()
+            self.term_id = term_id
 
     class ScrollChanged(Message):
         """Emitted when scroll offset changes so parent can update status bar."""
@@ -129,7 +131,7 @@ class TerminalEmulator(Widget, can_focus=True):
         self._on_disconnect()
 
     def _on_disconnect(self) -> None:
-        self.post_message(self.Disconnected())
+        self.post_message(self.Disconnected(self.id))
 
     @property
     def _max_scroll_offset(self) -> int:
@@ -166,11 +168,11 @@ class TerminalEmulator(Widget, can_focus=True):
                 return Strip.blank(self._cols)
 
         text = Text()
-        for chunk, fg, bg, bold, italics, underscore, is_cursor in self._pyte_screen.get_line_segments(absolute_y):
+        for chunk, fg, bg, bold, italics, underscore, inverse, is_cursor in self._pyte_screen.get_line_segments(absolute_y):
             fg_res = _resolve_color(fg, TERMINAL_FG)
             bg_res = _resolve_color(bg, TERMINAL_BG)
             # Only show cursor when viewing the live (bottom) view
-            if is_cursor and self._cursor_visible and self._scroll_offset == 0:
+            if (is_cursor and self._cursor_visible and self._scroll_offset == 0) or inverse:
                 fg_res, bg_res = bg_res, fg_res
             style_str = f"{fg_res} on {bg_res}"
             if bold:
