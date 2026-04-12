@@ -1,0 +1,31 @@
+name: Build Windows Library
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: x64
+          args: --release --out dist
+
+      - name: Upload Windows wheel and library
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-pyd
+          path: |
+            dist/*.whl
+            src/ssh_term/*.pyd

@@ -107,20 +107,21 @@ class FileTransferScreen(Screen):
         self.query_one("#local-tree").focus()
         self._init_sftp()
 
-    @work(thread=True)
-    def _init_sftp(self) -> None:
+    @work
+    async def _init_sftp(self) -> None:
         try:
-            sftp = self.app.ssh_manager.open_sftp(self.connection.id)
+            sftp = await self.app.ssh_manager.open_sftp(self.connection.id)
             self._sftp_manager = SFTPManager(sftp)
-            self.app.call_from_thread(self._mount_remote_tree)
+            cwd = await self._sftp_manager.cwd()
+            self._mount_remote_tree(cwd)
         except Exception as e:
-            self.app.call_from_thread(self.notify, f"SFTP error: {e}", severity="error")
+            self.notify(f"SFTP error: {e}", severity="error")
 
-    def _mount_remote_tree(self) -> None:
+    def _mount_remote_tree(self, cwd: str) -> None:
         placeholder = self.query_one("#remote-placeholder", Static)
         remote_pane = placeholder.parent
         placeholder.remove()
-        tree = RemoteFileTree(self._sftp_manager, id="remote-tree")
+        tree = RemoteFileTree(self._sftp_manager, cwd, id="remote-tree")
         remote_pane.mount(tree)
 
     def action_go_back(self) -> None:
@@ -131,8 +132,10 @@ class FileTransferScreen(Screen):
     def action_open_terminal(self) -> None:
         if self._sftp_manager:
             self._sftp_manager.close()
-        from ssh_term.screens.terminal_screen import TerminalScreen
-        self.app.switch_screen(TerminalScreen(self.connection))
+        # If we came from workspace, popping will return us to the tab.
+        # If we came from dashboard, appending tab on workspace and switching makes sense. 
+        # For simplicity, we can just switch to workspace.
+        self.app.switch_screen("workspace")
 
     def action_switch_pane(self) -> None:
         if self._active_pane == "local":
@@ -192,36 +195,30 @@ class FileTransferScreen(Screen):
             remote_path = remote_dir.rstrip("/") + "/" + filename
             self._do_upload(local_path, remote_path)
 
-    @work(thread=True)
-    def _do_upload(self, local_path: str, remote_path: str) -> None:
+    @work
+    async def _do_upload(self, local_path: str, remote_path: str) -> None:
         filename = os.path.basename(local_path)
         total = os.path.getsize(local_path)
-        self.app.call_from_thread(self._start_progress, filename, total)
-
-        def callback(transferred, total_bytes):
-            self.app.call_from_thread(self._update_progress, transferred, total_bytes)
+        self._start_progress(filename, total)
 
         try:
-            self._sftp_manager.upload(local_path, remote_path, callback=callback)
-            self.app.call_from_thread(self._finish_progress)
-            self.app.call_from_thread(self.notify, f"Uploaded {filename} \u2192 {os.path.dirname(remote_path)}")
+            await self._sftp_manager.upload(local_path, remote_path)
+            self._finish_progress()
+            self.notify(f"Uploaded {filename} \u2192 {os.path.dirname(remote_path)}")
         except Exception as e:
-            self.app.call_from_thread(self.notify, f"Upload failed: {e}", severity="error")
+            self.notify(f"Upload failed: {e}", severity="error")
 
-    @work(thread=True)
-    def _do_upload_dir(self, local_dir: str, remote_dir: str) -> None:
+    @work
+    async def _do_upload_dir(self, local_dir: str, remote_dir: str) -> None:
         dirname = os.path.basename(local_dir)
-        self.app.call_from_thread(self._start_progress, f"{dirname}/", 0)
-
-        def callback(transferred, total_bytes):
-            self.app.call_from_thread(self._update_progress, transferred, total_bytes)
+        self._start_progress(f"{dirname}/", 0)
 
         try:
-            count = self._sftp_manager.upload_recursive(local_dir, remote_dir, callback=callback)
-            self.app.call_from_thread(self._finish_progress)
-            self.app.call_from_thread(self.notify, f"Uploaded {dirname}/ ({count} files) \u2192 {os.path.dirname(remote_dir)}")
+            count = await self._sftp_manager.upload_recursive(local_dir, remote_dir)
+            self._finish_progress()
+            self.notify(f"Uploaded {dirname}/ ({count} files) \u2192 {os.path.dirname(remote_dir)}")
         except Exception as e:
-            self.app.call_from_thread(self.notify, f"Upload failed: {e}", severity="error")
+            self.notify(f"Upload failed: {e}", severity="error")
 
     def _download_selected(self) -> None:
         remote_trees = self.query("RemoteFileTree")
@@ -243,37 +240,31 @@ class FileTransferScreen(Screen):
             local_path = os.path.join(local_dir, filename)
             self._do_download(remote_path, local_path)
 
-    @work(thread=True)
-    def _do_download(self, remote_path: str, local_path: str) -> None:
+    @work
+    async def _do_download(self, remote_path: str, local_path: str) -> None:
         filename = os.path.basename(remote_path)
-        stat = self._sftp_manager.stat(remote_path)
-        total = stat.st_size if stat and stat.st_size else 0
-        self.app.call_from_thread(self._start_progress, filename, total)
-
-        def callback(transferred, total_bytes):
-            self.app.call_from_thread(self._update_progress, transferred, total_bytes)
+        stat = await self._sftp_manager.stat(remote_path)
+        total = stat.size if stat and getattr(stat, "size", None) else 0
+        self._start_progress(filename, total)
 
         try:
-            self._sftp_manager.download(remote_path, local_path, callback=callback)
-            self.app.call_from_thread(self._finish_progress)
-            self.app.call_from_thread(self.notify, f"Downloaded {filename} \u2192 {os.path.dirname(local_path)}")
+            await self._sftp_manager.download(remote_path, local_path)
+            self._finish_progress()
+            self.notify(f"Downloaded {filename} \u2192 {os.path.dirname(local_path)}")
         except Exception as e:
-            self.app.call_from_thread(self.notify, f"Download failed: {e}", severity="error")
+            self.notify(f"Download failed: {e}", severity="error")
 
-    @work(thread=True)
-    def _do_download_dir(self, remote_dir: str, local_dir: str) -> None:
+    @work
+    async def _do_download_dir(self, remote_dir: str, local_dir: str) -> None:
         dirname = os.path.basename(remote_dir)
-        self.app.call_from_thread(self._start_progress, f"{dirname}/", 0)
-
-        def callback(transferred, total_bytes):
-            self.app.call_from_thread(self._update_progress, transferred, total_bytes)
+        self._start_progress(f"{dirname}/", 0)
 
         try:
-            count = self._sftp_manager.download_recursive(remote_dir, local_dir, callback=callback)
-            self.app.call_from_thread(self._finish_progress)
-            self.app.call_from_thread(self.notify, f"Downloaded {dirname}/ ({count} files) \u2192 {os.path.dirname(local_dir)}")
+            count = await self._sftp_manager.download_recursive(remote_dir, local_dir)
+            self._finish_progress()
+            self.notify(f"Downloaded {dirname}/ ({count} files) \u2192 {os.path.dirname(local_dir)}")
         except Exception as e:
-            self.app.call_from_thread(self.notify, f"Download failed: {e}", severity="error")
+            self.notify(f"Download failed: {e}", severity="error")
 
     def action_collapse_all(self) -> None:
         if self._active_pane == "local":

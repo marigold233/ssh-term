@@ -1,14 +1,14 @@
-"""Terminal emulator widget using pyte + paramiko."""
+"""Terminal emulator widget using rs_term + asyncssh."""
 
 from __future__ import annotations
 
-import threading
-
-import paramiko
-import pyte
+import asyncio
+import asyncssh
+import ssh_term.rs_term as rs_term
 from rich.text import Text
 from textual import work
-from textual.widgets import Static
+from textual.widget import Widget
+from textual.strip import Strip
 from textual.events import Key, Resize
 
 from ssh_term.theme import TERMINAL_FG, TERMINAL_BG, TERMINAL_ANSI
@@ -34,12 +34,33 @@ _PYTE_COLOR_MAP = {
 }
 
 
+def _get_256_color(n: int) -> str:
+    if n < 16:
+        return TERMINAL_ANSI[n]
+    if n < 232:
+        n -= 16
+        r = (n // 36) * 51
+        g = ((n // 6) % 6) * 51
+        b = (n % 6) * 51
+        return f"#{r:02x}{g:02x}{b:02x}"
+    if n < 256:
+        v = (n - 232) * 10 + 8
+        return f"#{v:02x}{v:02x}{v:02x}"
+    return ""
+
 def _resolve_color(color: str, default: str) -> str:
     if not color or color == "default":
         return default
     if color in _PYTE_COLOR_MAP:
         return _PYTE_COLOR_MAP[color]
-    if len(color) == 6:
+    if color.startswith("color"):
+        try:
+            return _get_256_color(int(color[5:]))
+        except ValueError:
+            pass
+    if len(color) == 6 or len(color) == 7:
+        if color.startswith("#"):
+            return color
         try:
             int(color, 16)
             return f"#{color}"
@@ -48,7 +69,7 @@ def _resolve_color(color: str, default: str) -> str:
     return default
 
 
-class TerminalEmulator(Static):
+class TerminalEmulator(Widget, can_focus=True):
     DEFAULT_CSS = """
     TerminalEmulator {
         width: 1fr;
@@ -58,76 +79,141 @@ class TerminalEmulator(Static):
     }
     """
 
-    def __init__(self, channel: paramiko.Channel, **kwargs) -> None:
+    from textual.message import Message
+
+    class Disconnected(Message):
+        pass
+
+    class ScrollChanged(Message):
+        """Emitted when scroll offset changes so parent can update status bar."""
+        def __init__(self, offset: int, max_offset: int) -> None:
+            super().__init__()
+            self.offset = offset
+            self.max_offset = max_offset
+
+    def __init__(self, process: asyncssh.SSHClientProcess, **kwargs) -> None:
         super().__init__(**kwargs)
-        self.channel = channel
+        self.process = process
         self._cols = 80
         self._rows = 24
-        self._pyte_screen = pyte.Screen(self._cols, self._rows)
-        self.stream = pyte.Stream(self._pyte_screen)
-        self._stop_event = threading.Event()
-        self.can_focus = True
+        self._pyte_screen = rs_term.Screen(self._cols, self._rows)
+        self.stream = rs_term.Stream()
+        self._stop_process = False
+        self._cursor_visible = True
+        self._scroll_offset = 0  # 0 = at bottom (live view), >0 = scrolled up N lines
 
     def on_mount(self) -> None:
+        self.set_interval(0.5, self._toggle_cursor)
         self._read_channel()
 
-    @work(thread=True)
-    def _read_channel(self) -> None:
-        while not self._stop_event.is_set():
-            try:
-                if self.channel.recv_ready():
-                    data = self.channel.recv(4096)
-                    if not data:
-                        break
-                    self.stream.feed(data.decode("utf-8", errors="replace"))
-                    self.app.call_from_thread(self._refresh_content)
-                elif self.channel.exit_status_ready():
+    def _toggle_cursor(self) -> None:
+        self._cursor_visible = not self._cursor_visible
+        # Only bother refreshing if we're on the live view where cursor matters
+        if self._scroll_offset == 0:
+            self.refresh()
+
+    @work
+    async def _read_channel(self) -> None:
+        try:
+            while not self._stop_process:
+                data = await self.process.stdout.read(4096)
+                if not data:
                     break
-                else:
-                    self._stop_event.wait(0.02)
-            except Exception:
-                break
-        self.app.call_from_thread(self._on_disconnect)
+                self.stream.feed(self._pyte_screen, data)
+                # When new data arrives and user is at/near bottom, stay at bottom
+                if self._scroll_offset <= 2:
+                    self._scroll_offset = 0
+                self.refresh()
+        except Exception:
+            pass
+        self._on_disconnect()
 
     def _on_disconnect(self) -> None:
-        from textual.message import Message
+        self.post_message(self.Disconnected())
 
-        class Disconnected(Message):
-            pass
+    @property
+    def _max_scroll_offset(self) -> int:
+        """Maximum lines user can scroll up (= total history lines)."""
+        total = self._pyte_screen.get_total_lines()
+        return max(0, total - self._rows)
 
-        self.post_message(Disconnected())
+    def _set_scroll_offset(self, value: int) -> None:
+        """Set scroll offset clamped to valid range, and notify parent."""
+        old = self._scroll_offset
+        self._scroll_offset = max(0, min(self._max_scroll_offset, value))
+        if self._scroll_offset != old:
+            self.post_message(self.ScrollChanged(self._scroll_offset, self._max_scroll_offset))
+            self.refresh()
 
-    def _refresh_content(self) -> None:
-        self.update(self._render_screen())
+    def render_line(self, y: int) -> Strip:
+        """Render a single visible line.
+        
+        y is 0..(_rows-1) relative to the widget viewport.
+        We map it to an absolute line index into Rust's unified buffer.
+        """
+        total = self._pyte_screen.get_total_lines()
+        # absolute_y: which line in the full (history + live) buffer to display
+        # When _scroll_offset=0, we show the last _rows lines (the live terminal)
+        # When _scroll_offset=N, we shift the window up by N lines
+        start_line = max(0, total - self._rows - self._scroll_offset)
+        absolute_y = start_line + y
 
-    def _render_screen(self) -> Text:
+        if absolute_y >= total or absolute_y < 0:
+            try:
+                style = self.app.console.get_style(f"on {TERMINAL_BG}")
+                return Strip.blank(self._cols, style)
+            except Exception:
+                return Strip.blank(self._cols)
+
         text = Text()
-        cursor = self._pyte_screen.cursor
-        for y in range(self._pyte_screen.lines):
-            line = self._pyte_screen.buffer[y]
-            for x in range(self._pyte_screen.columns):
-                char = line[x]
-                ch = char.data or " "
-                fg = _resolve_color(char.fg, TERMINAL_FG)
-                bg = _resolve_color(char.bg, TERMINAL_BG)
-                style = f"{fg} on {bg}"
-                if char.bold:
-                    style += " bold"
-                if char.italics:
-                    style += " italic"
-                if char.underscore:
-                    style += " underline"
-                if y == cursor.y and x == cursor.x:
-                    style = f"{bg} on {fg}"
-                text.append(ch, style=style)
-            if y < self._pyte_screen.lines - 1:
-                text.append("\n")
-        return text
+        for chunk, fg, bg, bold, italics, underscore, is_cursor in self._pyte_screen.get_line_segments(absolute_y):
+            fg_res = _resolve_color(fg, TERMINAL_FG)
+            bg_res = _resolve_color(bg, TERMINAL_BG)
+            # Only show cursor when viewing the live (bottom) view
+            if is_cursor and self._cursor_visible and self._scroll_offset == 0:
+                fg_res, bg_res = bg_res, fg_res
+            style_str = f"{fg_res} on {bg_res}"
+            if bold:
+                style_str += " bold"
+            if italics:
+                style_str += " italic"
+            if underscore:
+                style_str += " underline"
+            text.append(chunk, style=style_str)
+
+        try:
+            segments = list(text.render(self.app.console))
+        except Exception:
+            return Strip.blank(self._cols)
+        return Strip(segments, self._cols)
 
     def on_key(self, event: Key) -> None:
+        key = event.key
+
+        # History navigation keys - intercept before sending to remote
+        if key in ("shift+pageup", "shift+page_up", "ctrl+up"):
+            event.stop()
+            event.prevent_default()
+            self._set_scroll_offset(self._scroll_offset + self._rows)
+            return
+        elif key in ("shift+pagedown", "shift+page_down", "ctrl+down"):
+            event.stop()
+            event.prevent_default()
+            self._set_scroll_offset(self._scroll_offset - self._rows)
+            return
+        elif key in ("shift+home", "ctrl+home"):
+            event.stop()
+            event.prevent_default()
+            self._set_scroll_offset(self._max_scroll_offset)
+            return
+        elif key in ("shift+end", "ctrl+end"):
+            event.stop()
+            event.prevent_default()
+            self._set_scroll_offset(0)
+            return
+
         event.stop()
         event.prevent_default()
-        key = event.key
 
         key_map = {
             "escape": "\x1b",
@@ -170,9 +256,39 @@ class TerminalEmulator(Static):
 
         if data:
             try:
-                self.channel.send(data.encode())
+                self.process.stdin.write(data)
+                # Snap back to live view on any keypress
+                if self._scroll_offset != 0:
+                    self._scroll_offset = 0
+                    self.post_message(self.ScrollChanged(0, self._max_scroll_offset))
+                self.refresh()
             except Exception:
                 pass
+
+    def write_stdin(self, data: str) -> None:
+        """Inject arbitrary string data into the terminal."""
+        if not data: return
+        try:
+            self.process.stdin.write(data)
+            # Snap back to live view
+            if self._scroll_offset != 0:
+                self._scroll_offset = 0
+                self.post_message(self.ScrollChanged(0, self._max_scroll_offset))
+            self.refresh()
+        except Exception as e:
+            pass
+
+    def on_mouse_scroll_up(self, event) -> None:
+        """Scroll up into history."""
+        event.stop()
+        event.prevent_default()
+        self._set_scroll_offset(self._scroll_offset + 3)
+
+    def on_mouse_scroll_down(self, event) -> None:
+        """Scroll down towards live view."""
+        event.stop()
+        event.prevent_default()
+        self._set_scroll_offset(self._scroll_offset - 3)
 
     def on_resize(self, event: Resize) -> None:
         cols = max(event.size.width, 1)
@@ -182,13 +298,15 @@ class TerminalEmulator(Static):
             self._rows = rows
             self._pyte_screen.resize(rows, cols)
             try:
-                self.channel.resize_pty(width=cols, height=rows)
+                self.process.change_terminal_size(cols, rows)
             except Exception:
                 pass
+            # Reset scroll on resize to avoid stale offsets
+            self._scroll_offset = 0
 
     def stop(self) -> None:
-        self._stop_event.set()
+        self._stop_process = True
         try:
-            self.channel.close()
+            self.process.close()
         except Exception:
             pass

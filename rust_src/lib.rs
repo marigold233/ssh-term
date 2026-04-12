@@ -1,0 +1,470 @@
+use pyo3::prelude::*;
+use std::collections::VecDeque;
+use vte::{Params, Parser, Perform};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Color {
+    Default,
+    Named(&'static str),
+    Indexed(u8),
+    Rgb(u8, u8, u8),
+}
+
+impl Color {
+    fn to_string_repr(&self) -> String {
+        match self {
+            Color::Default => "default".to_string(),
+            Color::Named(name) => name.to_string(),
+            Color::Indexed(idx) => format!("color{}", idx),
+            Color::Rgb(r, g, b) => format!("#{:02x}{:02x}{:02x}", r, g, b),
+        }
+    }
+}
+
+#[pyclass]
+#[derive(Clone, Copy)]
+pub struct PyChar {
+    #[pyo3(get)]
+    pub data: char,
+    // fg and bg are internal only since we use segments at the python layer
+    pub fg: Color,
+    pub bg: Color,
+    #[pyo3(get)]
+    pub bold: bool,
+    #[pyo3(get)]
+    pub italics: bool,
+    #[pyo3(get)]
+    pub underscore: bool,
+}
+
+impl Default for PyChar {
+    fn default() -> Self {
+        PyChar {
+            data: ' ',
+            fg: Color::Default,
+            bg: Color::Default,
+            bold: false,
+            italics: false,
+            underscore: false,
+        }
+    }
+}
+
+#[pyclass]
+#[derive(Clone)]
+pub struct PyCursor {
+    #[pyo3(get, set)]
+    pub x: usize,
+    #[pyo3(get, set)]
+    pub y: usize,
+}
+
+#[derive(Clone, Copy)]
+struct CurrentStyle {
+    fg: Color,
+    bg: Color,
+    bold: bool,
+    italics: bool,
+    underscore: bool,
+}
+
+impl Default for CurrentStyle {
+    fn default() -> Self {
+        CurrentStyle {
+            fg: Color::Default,
+            bg: Color::Default,
+            bold: false,
+            italics: false,
+            underscore: false,
+        }
+    }
+}
+
+#[pyclass]
+pub struct Screen {
+    #[pyo3(get)]
+    pub columns: usize,
+    #[pyo3(get)]
+    pub lines: usize,
+    #[pyo3(get)]
+    pub cursor: PyCursor,
+    buffer: VecDeque<Vec<PyChar>>,
+    scrollback_buffer: VecDeque<Vec<PyChar>>,
+    current_style: CurrentStyle,
+}
+
+#[pymethods]
+impl Screen {
+    #[new]
+    pub fn new(columns: usize, lines: usize) -> Self {
+        let columns = std::cmp::max(1, columns);
+        let lines = std::cmp::max(1, lines);
+        let mut buffer = VecDeque::with_capacity(lines);
+        for _ in 0..lines {
+            buffer.push_back(vec![PyChar::default(); columns]);
+        }
+        Screen {
+            columns,
+            lines,
+            cursor: PyCursor { x: 0, y: 0 },
+            buffer,
+            scrollback_buffer: VecDeque::new(),
+            current_style: CurrentStyle::default(),
+        }
+    }
+
+    pub fn resize(&mut self, lines: usize, columns: usize) {
+        let lines = std::cmp::max(1, lines);
+        let columns = std::cmp::max(1, columns);
+        self.lines = lines;
+        self.columns = columns;
+        self.buffer.resize_with(lines, || vec![PyChar::default(); columns]);
+        for row in self.buffer.iter_mut() {
+            row.resize(columns, PyChar::default());
+        }
+        if self.cursor.y >= lines {
+            self.cursor.y = lines.saturating_sub(1);
+        }
+        if self.cursor.x >= columns {
+            self.cursor.x = columns.saturating_sub(1);
+        }
+    }
+
+    pub fn get_total_lines(&self) -> usize {
+        self.scrollback_buffer.len() + self.lines
+    }
+
+    pub fn get_line_segments(&self, y: usize) -> Vec<(String, String, String, bool, bool, bool, bool)> {
+        let mut segments = Vec::new();
+        let total = self.scrollback_buffer.len() + self.lines;
+        if y >= total {
+            return segments;
+        }
+        
+        let in_history = y < self.scrollback_buffer.len();
+        let row = if in_history {
+            &self.scrollback_buffer[y]
+        } else {
+            let buffer_y = y - self.scrollback_buffer.len();
+            if buffer_y < self.buffer.len() {
+                &self.buffer[buffer_y]
+            } else {
+                return segments;
+            }
+        };
+
+        if row.is_empty() {
+            return segments;
+        }
+
+        let mut current_text = String::new();
+        let mut current_style: Option<(Color, Color, bool, bool, bool, bool)> = None;
+
+        for (x, cell) in row.iter().enumerate() {
+            let is_cursor = !in_history && (y - self.scrollback_buffer.len()) == self.cursor.y && x == self.cursor.x;
+            
+            let style = (cell.fg, cell.bg, cell.bold, cell.italics, cell.underscore, is_cursor);
+
+            if let Some(cs) = current_style {
+                if cs == style {
+                    current_text.push(cell.data);
+                } else {
+                    segments.push((
+                        current_text.clone(),
+                        cs.0.to_string_repr(),
+                        cs.1.to_string_repr(),
+                        cs.2,
+                        cs.3,
+                        cs.4,
+                        cs.5,
+                    ));
+                    current_text.clear();
+                    current_text.push(cell.data);
+                    current_style = Some(style);
+                }
+            } else {
+                current_text.push(cell.data);
+                current_style = Some(style);
+            }
+        }
+        
+        if let Some(cs) = current_style {
+            if !current_text.is_empty() {
+                segments.push((
+                    current_text,
+                    cs.0.to_string_repr(),
+                    cs.1.to_string_repr(),
+                    cs.2,
+                    cs.3,
+                    cs.4,
+                    cs.5,
+                ));
+            }
+        }
+        segments
+    }
+}
+
+impl Screen {
+    fn newline(&mut self) {
+        if self.cursor.y >= self.lines.saturating_sub(1) {
+            if let Some(dropped) = self.buffer.pop_front() {
+                self.scrollback_buffer.push_back(dropped);
+                if self.scrollback_buffer.len() > 5000 {
+                    self.scrollback_buffer.pop_front();
+                }
+            }
+            self.buffer.push_back(vec![PyChar::default(); self.columns]);
+        } else {
+            self.cursor.y += 1;
+        }
+    }
+}
+
+impl Perform for Screen {
+    fn print(&mut self, c: char) {
+        let x = self.cursor.x;
+        let y = self.cursor.y;
+        if y < self.buffer.len() {
+            let row = &mut self.buffer[y];
+            if x < row.len() {
+                let cell = &mut row[x];
+                cell.data = c;
+                cell.fg = self.current_style.fg;
+                cell.bg = self.current_style.bg;
+                cell.bold = self.current_style.bold;
+                cell.italics = self.current_style.italics;
+                cell.underscore = self.current_style.underscore;
+            }
+        }
+        self.cursor.x += 1;
+        if self.cursor.x >= self.columns {
+            self.cursor.x = 0;
+            self.newline();
+        }
+    }
+
+    fn execute(&mut self, byte: u8) {
+        match byte {
+            b'\n' | b'\x0B' | b'\x0C' => self.newline(),
+            b'\r' => self.cursor.x = 0,
+            b'\x08' => {
+                if self.cursor.x > 0 {
+                    self.cursor.x -= 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn csi_dispatch(&mut self, params: &Params, _intermediates: &[u8], _ignore: bool, action: char) {
+        let get_param = |idx: usize, def: u16| -> u16 {
+            let mut iter = params.iter();
+            for _ in 0..idx {
+                iter.next();
+            }
+            if let Some(p) = iter.next() {
+                if p.len() > 0 { p[0] } else { def }
+            } else {
+                def
+            }
+        };
+
+        match action {
+            'A' => { // Cursor Up
+                let n = get_param(0, 1) as usize;
+                self.cursor.y = self.cursor.y.saturating_sub(n);
+            }
+            'B' => { // Cursor Down
+                let n = get_param(0, 1) as usize;
+                self.cursor.y = std::cmp::min(self.lines.saturating_sub(1), self.cursor.y + n);
+            }
+            'C' => { // Cursor Forward
+                let n = get_param(0, 1) as usize;
+                self.cursor.x = std::cmp::min(self.columns.saturating_sub(1), self.cursor.x + n);
+            }
+            'D' => { // Cursor Back
+                let n = get_param(0, 1) as usize;
+                self.cursor.x = self.cursor.x.saturating_sub(n);
+            }
+            'H' | 'f' => { // Cursor Position
+                let r = std::cmp::max(1, get_param(0, 1)) as usize;
+                let c = std::cmp::max(1, get_param(1, 1)) as usize;
+                self.cursor.y = std::cmp::min(self.lines, r).saturating_sub(1);
+                self.cursor.x = std::cmp::min(self.columns, c).saturating_sub(1);
+            }
+            'J' => { // Erase in Display
+                let mode = get_param(0, 0);
+                let cy = std::cmp::min(self.cursor.y, self.buffer.len().saturating_sub(1));
+                let cx = if cy < self.buffer.len() {
+                    std::cmp::min(self.cursor.x, self.buffer[cy].len().saturating_sub(1))
+                } else { 0 };
+
+                match mode {
+                    0 => {
+                        if cy < self.buffer.len() {
+                            for x in cx..self.buffer[cy].len() {
+                                self.buffer[cy][x] = PyChar::default();
+                            }
+                            for y in (cy + 1)..self.buffer.len() {
+                                for x in 0..self.buffer[y].len() {
+                                    self.buffer[y][x] = PyChar::default();
+                                }
+                            }
+                        }
+                    }
+                    1 => {
+                        for y in 0..cy {
+                            if y < self.buffer.len() {
+                                for x in 0..self.buffer[y].len() {
+                                    self.buffer[y][x] = PyChar::default();
+                                }
+                            }
+                        }
+                        if cy < self.buffer.len() {
+                            for x in 0..=cx {
+                                if x < self.buffer[cy].len() {
+                                    self.buffer[cy][x] = PyChar::default();
+                                }
+                            }
+                        }
+                    }
+                    2 | 3 => {
+                        for y in 0..self.buffer.len() {
+                            for x in 0..self.buffer[y].len() {
+                                self.buffer[y][x] = PyChar::default();
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            'K' => { // Erase in Line
+                let mode = get_param(0, 0);
+                let cy = std::cmp::min(self.cursor.y, self.buffer.len().saturating_sub(1));
+                let cx = if cy < self.buffer.len() {
+                    std::cmp::min(self.cursor.x, self.buffer[cy].len().saturating_sub(1))
+                } else { 0 };
+
+                if cy < self.buffer.len() {
+                    match mode {
+                        0 => {
+                            for x in cx..self.buffer[cy].len() {
+                                self.buffer[cy][x] = PyChar::default();
+                            }
+                        }
+                        1 => {
+                            for x in 0..=cx {
+                                if x < self.buffer[cy].len() {
+                                    self.buffer[cy][x] = PyChar::default();
+                                }
+                            }
+                        }
+                        2 => {
+                            for x in 0..self.buffer[cy].len() {
+                                self.buffer[cy][x] = PyChar::default();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            'm' => { // SGR - Colors
+                if params.len() == 0 {
+                    self.current_style = CurrentStyle::default();
+                    return;
+                }
+                
+                let mut flat_params = Vec::new();
+                for param_list in params.iter() {
+                    for &p in param_list {
+                        flat_params.push(p);
+                    }
+                }
+                
+                let mut i = 0;
+                while i < flat_params.len() {
+                    let code = flat_params[i];
+                    match code {
+                        0 => self.current_style = CurrentStyle::default(),
+                        1 => self.current_style.bold = true,
+                        3 => self.current_style.italics = true,
+                        4 => self.current_style.underscore = true,
+                        22 => self.current_style.bold = false,
+                        23 => self.current_style.italics = false,
+                        24 => self.current_style.underscore = false,
+                        30..=37 => {
+                            let colors = ["black", "red", "green", "brown", "blue", "magenta", "cyan", "white"];
+                            self.current_style.fg = Color::Named(colors[(code - 30) as usize]);
+                        }
+                        38 => {
+                            if i + 2 < flat_params.len() && flat_params[i+1] == 5 {
+                                self.current_style.fg = Color::Indexed(flat_params[i+2] as u8);
+                                i += 2;
+                            } else if i + 4 < flat_params.len() && flat_params[i+1] == 2 {
+                                self.current_style.fg = Color::Rgb(flat_params[i+2] as u8, flat_params[i+3] as u8, flat_params[i+4] as u8);
+                                i += 4;
+                            }
+                        }
+                        39 => self.current_style.fg = Color::Default,
+                        40..=47 => {
+                            let colors = ["black", "red", "green", "brown", "blue", "magenta", "cyan", "white"];
+                            self.current_style.bg = Color::Named(colors[(code - 40) as usize]);
+                        }
+                        48 => {
+                            if i + 2 < flat_params.len() && flat_params[i+1] == 5 {
+                                self.current_style.bg = Color::Indexed(flat_params[i+2] as u8);
+                                i += 2;
+                            } else if i + 4 < flat_params.len() && flat_params[i+1] == 2 {
+                                self.current_style.bg = Color::Rgb(flat_params[i+2] as u8, flat_params[i+3] as u8, flat_params[i+4] as u8);
+                                i += 4;
+                            }
+                        }
+                        49 => self.current_style.bg = Color::Default,
+                        90..=97 => {
+                            let colors = ["brightblack", "brightred", "brightgreen", "brightyellow", "brightblue", "brightmagenta", "brightcyan", "brightwhite"];
+                            self.current_style.fg = Color::Named(colors[(code - 90) as usize]);
+                        }
+                        100..=107 => {
+                            let colors = ["brightblack", "brightred", "brightgreen", "brightyellow", "brightblue", "brightmagenta", "brightcyan", "brightwhite"];
+                            self.current_style.bg = Color::Named(colors[(code - 100) as usize]);
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+             }
+             _ => {}
+        }
+    }
+}
+
+#[pyclass]
+pub struct Stream {
+    parser: Parser,
+}
+
+#[pymethods]
+impl Stream {
+    #[new]
+    pub fn new() -> Self {
+        Stream {
+            parser: Parser::new(),
+        }
+    }
+
+    pub fn feed(&mut self, screen: &mut Screen, data: &str) {
+        for byte in data.as_bytes() {
+            self.parser.advance(screen, *byte);
+        }
+    }
+}
+
+#[pymodule]
+fn rs_term(_py: Python, m: &PyModule) -> PyResult<()> {
+    m.add_class::<Screen>()?;
+    m.add_class::<Stream>()?;
+    m.add_class::<PyChar>()?;
+    m.add_class::<PyCursor>()?;
+    Ok(())
+}

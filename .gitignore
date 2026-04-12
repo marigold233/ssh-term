@@ -1,3 +1,4 @@
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -6,9 +7,32 @@ dist/
 build/
 .eggs/
 *.egg
+
+# Python Virtual Environments
 .venv/
 venv/
+env/
+ENV/
+
+# Secrets and Configs
 .env
+
+# Rust
+target/
+
+# Compiled C/Rust Extensions for Python
+*.so
+*.pyd
+*.dll
+*.dylib
+
+# IDE / Editor Files
+.vscode/
+.idea/
 *.swp
 *.swo
 *~
+
+# OS Specific
+.DS_Store
+Thumbs.db

@@ -9,6 +9,8 @@ from ssh_term.models.config import ConfigManager
 from ssh_term.services.ssh_manager import SSHManager
 from ssh_term.screens.auth_screen import AuthScreen
 from ssh_term.screens.dashboard import DashboardScreen
+from ssh_term.screens.workspace_screen import WorkspaceScreen
+from ssh_term.screens.snippet_manager import SnippetManagerScreen
 from ssh_term.theme import THEMES
 
 
@@ -111,6 +113,7 @@ class SSHTermApp(App):
         self.config_manager = ConfigManager()
         self.auth_manager = AuthManager()
         self.ssh_manager = SSHManager()
+        self.workspace = WorkspaceScreen()
 
     def on_mount(self) -> None:
         self.config_manager.load()
@@ -121,7 +124,10 @@ class SSHTermApp(App):
 
         def on_auth(result: bool) -> None:
             if result:
-                self.push_screen(DashboardScreen())
+                self.install_screen(DashboardScreen(), "dashboard")
+                self.install_screen(SnippetManagerScreen(), "snippet_manager")
+                self.install_screen(self.workspace, "workspace")
+                self.push_screen("dashboard")
             else:
                 self.exit()
 

@@ -37,6 +37,7 @@ class HintBar(Static):
             f"[bold {err}]d[/] Delete  "
             f"[bold {err}]\u23ce[/] Connect  "
             f"[bold {err}]f[/] Files  "
+            f"[bold {err}]s[/] Snippets  "
             f"[bold {err}]T[/] Theme  "
             f"[bold {err}]q[/] Quit"
         )
@@ -66,6 +67,7 @@ class DashboardScreen(Screen):
         Binding("d", "delete_connection", "Delete", show=False, priority=True),
         Binding("enter", "connect", "Connect", show=False, priority=True),
         Binding("f", "file_transfer", "File Transfer", show=False, priority=True),
+        Binding("s", "manage_snippets", "Snippets", show=False, priority=True),
         Binding("T", "cycle_theme", "Theme", show=False, priority=True),
         Binding("q", "quit", "Quit", show=False, priority=True),
     ]
@@ -141,7 +143,7 @@ class DashboardScreen(Screen):
             callback=on_confirm,
         )
 
-    def action_connect(self) -> None:
+    async def action_connect(self) -> None:
         conn_id = self._get_selected_id()
         if not conn_id:
             self.notify("No connection selected", severity="warning")
@@ -160,7 +162,7 @@ class DashboardScreen(Screen):
                 return
 
         try:
-            self.app.ssh_manager.connect(conn, password=password)
+            await self.app.ssh_manager.connect(conn, password=password)
             conn.touch()
             self.app.config_manager.update_connection(conn)
             self._refresh_table()
@@ -168,10 +170,10 @@ class DashboardScreen(Screen):
             self.notify(f"Connection failed: {e}", severity="error")
             return
 
-        from ssh_term.screens.terminal_screen import TerminalScreen
-        self.app.push_screen(TerminalScreen(conn))
+        self.app.workspace.enqueue_connection(conn)
+        self.app.switch_screen("workspace")
 
-    def action_file_transfer(self) -> None:
+    async def action_file_transfer(self) -> None:
         conn_id = self._get_selected_id()
         if not conn_id:
             self.notify("No connection selected", severity="warning")
@@ -190,18 +192,20 @@ class DashboardScreen(Screen):
                     self.notify("Failed to decrypt password", severity="error")
                     return
             try:
-                self.app.ssh_manager.connect(conn, password=password)
+                await self.app.ssh_manager.connect(conn, password=password)
             except Exception as e:
                 self.notify(f"Connection failed: {e}", severity="error")
                 return
 
-        from ssh_term.screens.file_transfer import FileTransferScreen
-        self.app.push_screen(FileTransferScreen(conn))
+        self.app.notify("File Transfer (SFTP) component not yet implemented. Try using standard scp for now.", title="SFTP")
+
+    def action_manage_snippets(self) -> None:
+        self.app.switch_screen("snippet_manager")
 
     def action_cycle_theme(self) -> None:
-        new = next_theme(self.app.theme)
-        self.app.theme = new
-        self.app.config_manager.theme = new
+        new_theme = next_theme(self.app.theme)
+        self.app.theme = new_theme
+        self.app.config_manager.theme = new_theme
         self.app.config_manager.save()
         self.query_one(HintBar).refresh_hints()
 

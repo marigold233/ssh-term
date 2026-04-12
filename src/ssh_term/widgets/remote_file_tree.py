@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from rich.text import Text
+from textual import work
 from textual.widgets import Tree
 from textual.widgets._tree import TreeNode
 
@@ -17,27 +18,28 @@ class RemoteFileTree(Tree):
     }
     """
 
-    def __init__(self, sftp_manager: SFTPManager, **kwargs) -> None:
+    def __init__(self, sftp_manager: SFTPManager, root_path: str, **kwargs) -> None:
         self._sftp = sftp_manager
-        root_path = sftp_manager.cwd()
         super().__init__(root_path, **kwargs)
         self.root.data = root_path
 
-    def on_mount(self) -> None:
-        self._load_node(self.root)
+    @work
+    async def on_mount(self) -> None:
+        await self._load_node(self.root)
         self.root.expand()
 
-    def on_tree_node_expanded(self, event: Tree.NodeExpanded) -> None:
+    @work
+    async def on_tree_node_expanded(self, event: Tree.NodeExpanded) -> None:
         node = event.node
         if node.data and len(node.children) == 1 and node.children[0].label.plain == "...":
             node.children[0].remove()
-            self._load_node(node)
+            await self._load_node(node)
 
-    def _load_node(self, node: TreeNode) -> None:
+    async def _load_node(self, node: TreeNode) -> None:
         path = node.data
         if not path:
             return
-        entries = self._sftp.listdir(path)
+        entries = await self._sftp.listdir(path)
         for entry in entries:
             if entry.name.startswith("."):
                 continue

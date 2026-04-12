@@ -5,65 +5,65 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-import paramiko
+import asyncssh
 
 from ssh_term.models.connection import SSHConnection
 
 
 class SSHManager:
     def __init__(self) -> None:
-        self._clients: dict[str, paramiko.SSHClient] = {}
+        self._clients: dict[str, asyncssh.SSHClientConnection] = {}
 
-    def connect(
+    async def connect(
         self,
         conn: SSHConnection,
         password: str | None = None,
-    ) -> paramiko.SSHClient:
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    ) -> asyncssh.SSHClientConnection:
+        existing = self.get_client(conn.id)
+        if existing:
+            return existing
 
         connect_kwargs: dict = {
-            "hostname": conn.host,
+            "host": conn.host,
             "port": conn.port,
             "username": conn.username,
-            "timeout": 10,
+            "known_hosts": None,
         }
 
         if conn.auth_method == "key":
             key_path = os.path.expanduser(conn.private_key_path)
             if Path(key_path).exists():
-                connect_kwargs["key_filename"] = key_path
-            else:
-                connect_kwargs["look_for_keys"] = True
+                connect_kwargs["client_keys"] = [key_path]
         elif conn.auth_method == "password" and password:
             connect_kwargs["password"] = password
         elif conn.auth_method == "agent":
-            connect_kwargs["allow_agent"] = True
+            pass # agent is implicitly used by asyncssh unless disabled
 
-        client.connect(**connect_kwargs)
+        client = await asyncssh.connect(**connect_kwargs)
         self._clients[conn.id] = client
         return client
 
-    def get_client(self, conn_id: str) -> paramiko.SSHClient | None:
+    def get_client(self, conn_id: str) -> asyncssh.SSHClientConnection | None:
         return self._clients.get(conn_id)
 
-    def open_shell(
+    async def open_shell(
         self, conn_id: str, cols: int = 80, rows: int = 24
-    ) -> paramiko.Channel:
+    ) -> asyncssh.SSHClientProcess:
         client = self._clients.get(conn_id)
         if not client:
             raise RuntimeError(f"No active connection for {conn_id}")
-        channel = client.invoke_shell(
-            term="xterm-256color", width=cols, height=rows
+        process = await client.create_process(
+            term_type="xterm-256color", 
+            term_size=(cols, rows),
+            env={"TERM": "xterm-256color", "COLORTERM": "truecolor"}
         )
-        channel.settimeout(0.0)
-        return channel
+        return process
 
-    def open_sftp(self, conn_id: str) -> paramiko.SFTPClient:
+    async def open_sftp(self, conn_id: str) -> asyncssh.SFTPClient:
         client = self._clients.get(conn_id)
         if not client:
             raise RuntimeError(f"No active connection for {conn_id}")
-        return client.open_sftp()
+        return await client.start_sftp_client()
 
     def disconnect(self, conn_id: str) -> None:
         client = self._clients.pop(conn_id, None)
@@ -79,5 +79,6 @@ class SSHManager:
         client = self._clients.get(conn_id)
         if not client:
             return False
-        transport = client.get_transport()
-        return transport is not None and transport.is_active()
+        # If the client exists in our active dictionary, we consider it connected
+        # Disconnections are handled when the terminal emulator raises Disconnected.
+        return True

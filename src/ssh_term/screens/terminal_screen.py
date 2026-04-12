@@ -7,6 +7,7 @@ from textual.screen import Screen
 from textual.widgets import Static
 from textual.binding import Binding
 
+from textual import work
 from ssh_term.theme import get_color, TERMINAL_BG
 from ssh_term.models.connection import SSHConnection
 from ssh_term.widgets.terminal_emulator import TerminalEmulator
@@ -36,13 +37,23 @@ class TerminalScreen(Screen):
         self.connection = connection
 
     def compose(self) -> ComposeResult:
-        channel = self.app.ssh_manager.open_shell(self.connection.id)
-        yield TerminalEmulator(channel, id="terminal")
         yield Static("", id="term-status")
 
-    def on_mount(self) -> None:
-        self.query_one("#terminal").focus()
+    @work
+    async def on_mount(self) -> None:
         err = get_color(self.app.theme, "error")
+        # Start connection status
+        self.query_one("#term-status", Static).update(" Connecting...")
+        
+        try:
+            channel = await self.app.ssh_manager.open_shell(self.connection.id)
+            emulator = TerminalEmulator(channel, id="terminal")
+            await self.mount(emulator)
+            emulator.focus()
+        except Exception as e:
+            self.query_one("#term-status", Static).update(f" Error: {e}")
+            return
+
         self.query_one("#term-status", Static).update(
             f" {self.connection.name} ({self.connection.host})  |  "
             f"[bold {err}]Ctrl+D[/] disconnect  "
@@ -56,7 +67,8 @@ class TerminalScreen(Screen):
 
     def action_disconnect(self) -> None:
         terminal = self.query_one("#terminal", TerminalEmulator)
-        terminal.stop()
+        if terminal:
+            terminal.stop()
         self.app.ssh_manager.disconnect(self.connection.id)
         self.app.pop_screen()
         self.app.notify("Disconnected")

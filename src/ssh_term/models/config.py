@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from ssh_term.models.connection import SSHConnection
+from ssh_term.models.snippet import Snippet
 
 CONFIG_DIR = Path.home() / ".config" / "ssh-term"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -19,6 +20,7 @@ def _default_config() -> dict:
         "salt": "",
         "theme": "tokyo-night",
         "connections": [],
+        "snippets": [],
     }
 
 
@@ -98,6 +100,35 @@ class ConfigManager:
             if c.id == conn_id:
                 return c
         return None
+
+    @property
+    def snippets(self) -> list[Snippet]:
+        return [Snippet.from_dict(s) for s in self._data.get("snippets", [])]
+
+    @snippets.setter
+    def snippets(self, snips: list[Snippet]) -> None:
+        self._data["snippets"] = [s.to_dict() for s in snips]
+
+    def add_snippet(self, snippet: Snippet) -> None:
+        snips = self.snippets
+        snips.append(snippet)
+        self.snippets = snips
+        self.save()
+
+    def update_snippet(self, snippet: Snippet) -> None:
+        snips = self.snippets
+        for i, s in enumerate(snips):
+            if s.id == snippet.id:
+                snippet.touch()
+                snips[i] = snippet
+                break
+        self.snippets = snips
+        self.save()
+
+    def delete_snippet(self, snippet_id: str) -> None:
+        snips = [s for s in self.snippets if s.id != snippet_id]
+        self.snippets = snips
+        self.save()
 
     @property
     def theme(self) -> str:

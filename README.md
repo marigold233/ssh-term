@@ -270,7 +270,7 @@ src/ssh_term/
 │   ├── terminal_screen.py    # Full-screen SSH terminal with status bar
 │   └── file_transfer.py      # Dual-pane SFTP browser with progress bar
 ├── widgets/
-│   ├── terminal_emulator.py  # pyte Screen + paramiko Channel → Rich Text rendering
+│   ├── terminal_emulator.py  # rs_term Screen + asyncssh Process → Rich Text rendering
 │   ├── connection_table.py   # Styled DataTable with row cursor + zebra stripes
 │   ├── local_file_tree.py    # Local DirectoryTree with non-emoji icons
 │   ├── remote_file_tree.py   # Lazy-loading SFTP directory tree with Rich Text labels
@@ -289,7 +289,7 @@ src/ssh_term/
 |--------------------------------------------------|--------------------------------------------|
 | [textual](https://textual.textualize.io/) >= 1.0 | TUI framework (widgets, screens, styling)  |
 | [rich](https://rich.readthedocs.io/) >= 13.0     | Terminal text rendering                    |
-| [paramiko](https://www.paramiko.org/) >= 3.4     | SSH2 protocol (connections, shells, SFTP)  |
+| [asyncssh](https://asyncssh.readthedocs.io/)>= 2.14    | SSH2 protocol (connections, shells, SFTP)  |
 | [pyte](https://pyte.readthedocs.io/) >= 0.8.2   | VT100/xterm terminal emulation            |
 | [bcrypt](https://github.com/pyca/bcrypt) >= 4.0  | Password hashing                          |
 | [cryptography](https://cryptography.io/) >= 42.0 | Fernet symmetric encryption + PBKDF2      |
@@ -339,7 +339,7 @@ There is no password recovery. Delete `~/.config/ssh-term/config.json` and start
 
 - Initial release
 - SSH connection management (add, edit, delete)
-- Full-screen terminal emulation with pyte + paramiko
+- Full-screen terminal emulation with rs_term + asyncssh
 - Dual-pane SFTP file transfer with progress bar
 - Master password authentication with bcrypt + Fernet encryption
 - Tokyo Night color scheme
