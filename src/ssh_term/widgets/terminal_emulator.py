@@ -93,6 +93,12 @@ class TerminalEmulator(Widget, can_focus=True):
             self.offset = offset
             self.max_offset = max_offset
 
+    class KeyBroadcast(Message):
+        """Emitted after a key is sent to the local pty so broadcast mode can replicate it."""
+        def __init__(self, data: str) -> None:
+            super().__init__()
+            self.data = data
+
     def __init__(self, process: asyncssh.SSHClientProcess, **kwargs) -> None:
         super().__init__(**kwargs)
         self.process = process
@@ -264,6 +270,8 @@ class TerminalEmulator(Widget, can_focus=True):
                     self._scroll_offset = 0
                     self.post_message(self.ScrollChanged(0, self._max_scroll_offset))
                 self.refresh()
+                # Notify parent for broadcast fan-out
+                self.post_message(self.KeyBroadcast(data))
             except Exception:
                 pass
 
