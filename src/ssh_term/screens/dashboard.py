@@ -172,12 +172,7 @@ class DashboardScreen(Screen):
                 return
 
         try:
-            await self.app.ssh_manager.connect(
-                conn,
-                password=password,
-                all_connections=self.app.config_manager.connections,
-                auth_manager=self.app.auth_manager,
-            )
+            await self.app.ssh_manager.connect(conn, password=password)
             conn.touch()
             self.app.config_manager.update_connection(conn)
             self._refresh_table()
@@ -207,12 +202,7 @@ class DashboardScreen(Screen):
                     self.notify("Failed to decrypt password", severity="error")
                     return
             try:
-                await self.app.ssh_manager.connect(
-                    conn,
-                    password=password,
-                    all_connections=self.app.config_manager.connections,
-                    auth_manager=self.app.auth_manager,
-                )
+                await self.app.ssh_manager.connect(conn, password=password)
             except Exception as e:
                 self.notify(f"Connection failed: {e}", severity="error")
                 return

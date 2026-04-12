@@ -22,10 +22,6 @@ class SSHConnection:
     color_label: str = "blue"
     last_connected: str = ""
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    # Jump server (bastion/proxy) - ID of another SSHConnection to tunnel through
-    proxy_jump_id: str = ""
-    # Port forwarding rules: "local_port:remote_host:remote_port"  e.g. "8080:localhost:80"
-    port_forwards: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
