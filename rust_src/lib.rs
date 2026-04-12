@@ -262,8 +262,8 @@ impl Screen {
     }
 
     fn insert_lines(&mut self, count: usize) {
-        let (_, bottom) = self.get_margins();
-        if self.cursor.y > bottom { return; }
+        let (top, bottom) = self.get_margins();
+        if self.cursor.y < top || self.cursor.y > bottom { return; }
         for _ in 0..count {
             if bottom < self.buffer.len() {
                 self.buffer.remove(bottom);
@@ -273,8 +273,8 @@ impl Screen {
     }
 
     fn delete_lines(&mut self, count: usize) {
-        let (_, bottom) = self.get_margins();
-        if self.cursor.y > bottom { return; }
+        let (top, bottom) = self.get_margins();
+        if self.cursor.y < top || self.cursor.y > bottom { return; }
         for _ in 0..count {
             if self.cursor.y < self.buffer.len() {
                 self.buffer.remove(self.cursor.y);
@@ -286,6 +286,10 @@ impl Screen {
 
 impl Perform for Screen {
     fn print(&mut self, c: char) {
+        if self.cursor.x >= self.columns {
+            self.cursor.x = 0;
+            self.newline();
+        }
         let x = self.cursor.x;
         let y = self.cursor.y;
         if y < self.buffer.len() {
@@ -301,10 +305,6 @@ impl Perform for Screen {
             }
         }
         self.cursor.x += 1;
-        if self.cursor.x >= self.columns {
-            self.cursor.x = 0;
-            self.newline();
-        }
     }
 
     fn execute(&mut self, byte: u8) {
