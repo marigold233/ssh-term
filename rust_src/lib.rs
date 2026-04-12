@@ -91,6 +91,7 @@ pub struct Screen {
     buffer: VecDeque<Vec<PyChar>>,
     scrollback_buffer: VecDeque<Vec<PyChar>>,
     current_style: CurrentStyle,
+    margins: Option<(usize, usize)>,
 }
 
 #[pymethods]
@@ -110,6 +111,7 @@ impl Screen {
             buffer,
             scrollback_buffer: VecDeque::new(),
             current_style: CurrentStyle::default(),
+            margins: None,
         }
     }
 
@@ -128,6 +130,7 @@ impl Screen {
         if self.cursor.x >= columns {
             self.cursor.x = columns.saturating_sub(1);
         }
+        self.margins = None;
     }
 
     pub fn get_total_lines(&self) -> usize {
@@ -206,8 +209,17 @@ impl Screen {
 }
 
 impl Screen {
-    fn newline(&mut self) {
-        if self.cursor.y >= self.lines.saturating_sub(1) {
+    fn get_margins(&self) -> (usize, usize) {
+        if let Some((t, b)) = self.margins {
+            (t, std::cmp::min(b, self.lines.saturating_sub(1)))
+        } else {
+            (0, self.lines.saturating_sub(1))
+        }
+    }
+
+    fn scroll_up(&mut self) {
+        let (top, bottom) = self.get_margins();
+        if top == 0 && bottom == self.lines.saturating_sub(1) {
             if let Some(dropped) = self.buffer.pop_front() {
                 self.scrollback_buffer.push_back(dropped);
                 if self.scrollback_buffer.len() > 5000 {
@@ -216,7 +228,58 @@ impl Screen {
             }
             self.buffer.push_back(vec![PyChar::default(); self.columns]);
         } else {
+            if top <= bottom && bottom < self.buffer.len() {
+                self.buffer.remove(top);
+                self.buffer.insert(bottom, vec![PyChar::default(); self.columns]);
+            }
+        }
+    }
+
+    fn scroll_down(&mut self) {
+        let (top, bottom) = self.get_margins();
+        if top <= bottom && bottom < self.buffer.len() {
+            self.buffer.remove(bottom);
+            self.buffer.insert(top, vec![PyChar::default(); self.columns]);
+        }
+    }
+
+    fn newline(&mut self) {
+        let (_, bottom) = self.get_margins();
+        if self.cursor.y == bottom {
+            self.scroll_up();
+        } else if self.cursor.y < self.lines.saturating_sub(1) {
             self.cursor.y += 1;
+        }
+    }
+
+    fn reverse_index(&mut self) {
+        let (top, _) = self.get_margins();
+        if self.cursor.y == top {
+            self.scroll_down();
+        } else if self.cursor.y > 0 {
+            self.cursor.y -= 1;
+        }
+    }
+
+    fn insert_lines(&mut self, count: usize) {
+        let (_, bottom) = self.get_margins();
+        if self.cursor.y > bottom { return; }
+        for _ in 0..count {
+            if bottom < self.buffer.len() {
+                self.buffer.remove(bottom);
+                self.buffer.insert(self.cursor.y, vec![PyChar::default(); self.columns]);
+            }
+        }
+    }
+
+    fn delete_lines(&mut self, count: usize) {
+        let (_, bottom) = self.get_margins();
+        if self.cursor.y > bottom { return; }
+        for _ in 0..count {
+            if self.cursor.y < self.buffer.len() {
+                self.buffer.remove(self.cursor.y);
+                self.buffer.insert(bottom, vec![PyChar::default(); self.columns]);
+            }
         }
     }
 }
@@ -253,6 +316,14 @@ impl Perform for Screen {
                     self.cursor.x -= 1;
                 }
             }
+            _ => {}
+        }
+    }
+
+    fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        match (intermediates, byte) {
+            (&[], b'M') => self.reverse_index(),
+            (&[], b'D') => self.newline(),
             _ => {}
         }
     }
@@ -368,6 +439,28 @@ impl Perform for Screen {
                         _ => {}
                     }
                 }
+            }
+            'L' => { // IL - Insert Line
+                let n = std::cmp::max(1, get_param(0, 1)) as usize;
+                self.insert_lines(n);
+            }
+            'M' => { // DL - Delete Line
+                let n = std::cmp::max(1, get_param(0, 1)) as usize;
+                self.delete_lines(n);
+            }
+            'r' => { // DECSTBM - Set Top and Bottom Margins
+                let top = std::cmp::max(1, get_param(0, 1)) as usize;
+                let mut bot = get_param(1, 0) as usize;
+                if bot == 0 { bot = self.lines; }
+                bot = std::cmp::min(self.lines, bot);
+                let top = std::cmp::min(self.lines, top);
+                if top < bot {
+                    self.margins = Some((top.saturating_sub(1), bot.saturating_sub(1)));
+                } else {
+                    self.margins = None;
+                }
+                self.cursor.x = 0;
+                self.cursor.y = 0;
             }
             'm' => { // SGR - Colors
                 if params.len() == 0 {

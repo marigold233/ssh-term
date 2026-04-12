@@ -190,8 +190,9 @@ class WorkspaceScreen(Screen):
                         self._update_telemetry_bar(session_id)
                     except asyncio.CancelledError:
                         return
-                    except Exception:
-                        self._telemetry_data[session_id] = "Telemetry N/A"
+                    except Exception as e:
+                        self._telemetry_data[session_id] = f"Telemetry Error: {type(e).__name__} {e}"
+                        self._update_telemetry_bar(session_id)
                 await asyncio.sleep(3)
 
         task = asyncio.create_task(loop())
@@ -326,7 +327,7 @@ class WorkspaceScreen(Screen):
             
         del self._tabs_data[session_id]
         self._telemetry_data.pop(session_id, None)
-        self._last_cpu.pop(session_id, None)
+        self._last_stats.pop(session_id, None)
         
         # Only disconnect the SSH connection if no other tabs use it
         other_sessions_for_conn = [
