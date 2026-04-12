@@ -93,6 +93,18 @@ class TerminalEmulator(Widget, can_focus=True):
             self.offset = offset
             self.max_offset = max_offset
 
+    class RequestHistorySearch(Message):
+        """User pressed F3 — request to open history search bar."""
+        pass
+
+    class RequestSplitH(Message):
+        """User pressed F5 — request a horizontal split pane."""
+        pass
+
+    class RequestCloseSplit(Message):
+        """User pressed F7 — request to close split panes."""
+        pass
+
     def __init__(self, process: asyncssh.SSHClientProcess, **kwargs) -> None:
         super().__init__(**kwargs)
         self.process = process
@@ -216,6 +228,18 @@ class TerminalEmulator(Widget, can_focus=True):
 
         event.stop()
         event.prevent_default()
+
+        # ── Function-key workspace commands (intercepted here so they are NOT
+        #    forwarded to the remote pty; messages bubble up to WorkspaceScreen)
+        if key == "f3":
+            self.post_message(self.RequestHistorySearch())
+            return
+        elif key == "f5":
+            self.post_message(self.RequestSplitH())
+            return
+        elif key == "f7":
+            self.post_message(self.RequestCloseSplit())
+            return
 
         key_map = {
             "escape": "\x1b",

@@ -5,11 +5,11 @@ from __future__ import annotations
 import asyncio
 import re
 
-from textual import work
+from textual import work, on
 from textual.app import ComposeResult
-from textual.screen import Screen
-from textual.widgets import Static, TabbedContent, TabPane, Input
-from textual.containers import Horizontal
+from textual.screen import Screen, ModalScreen
+from textual.widgets import Static, TabbedContent, TabPane, Input, Button
+from textual.containers import Horizontal, Vertical, Center
 from textual.binding import Binding
 
 from ssh_term.theme import get_color, TERMINAL_BG
@@ -17,6 +17,74 @@ from ssh_term.models.connection import SSHConnection
 from ssh_term.widgets.terminal_emulator import TerminalEmulator
 from ssh_term.screens.snippet_palette import SnippetPaletteScreen
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Split connection picker modal
+# ─────────────────────────────────────────────────────────────────────────────
+
+class SplitConnectionPicker(ModalScreen):
+    """Pick which open connection to open in the split pane."""
+
+    BINDINGS = [Binding("escape", "cancel", show=False, priority=True)]
+
+    CSS = """
+    SplitConnectionPicker { align: center middle; }
+    SplitConnectionPicker #picker-box {
+        width: 54;
+        height: auto;
+        max-height: 22;
+        border: thick $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+    SplitConnectionPicker .picker-title {
+        text-align: center;
+        text-style: bold;
+        color: $primary;
+        margin-bottom: 1;
+        border-bottom: solid $panel;
+    }
+    SplitConnectionPicker Button {
+        width: 1fr;
+        margin-bottom: 1;
+    }
+    """
+
+    def __init__(self, connections: list[SSHConnection], **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.connections = connections
+
+    def compose(self) -> ComposeResult:
+        with Center():
+            with Vertical(id="picker-box"):
+                yield Static("F5 — Select connection for split pane", classes="picker-title")
+                for conn in self.connections:
+                    label = f"  {conn.name}   [{conn.host}:{conn.port}]"
+                    yield Button(label, id=f"conn-{conn.id}", variant="default")
+                yield Button("Cancel", id="cancel-btn", variant="error")
+
+    def on_mount(self) -> None:
+        # Focus first connection button
+        try:
+            self.query("Button").first().focus()
+        except Exception:
+            pass
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel-btn":
+            self.dismiss(None)
+        else:
+            conn_id = event.button.id.replace("conn-", "")
+            conn = next((c for c in self.connections if c.id == conn_id), None)
+            self.dismiss(conn)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WorkspaceScreen
+# ─────────────────────────────────────────────────────────────────────────────
 
 class WorkspaceScreen(Screen):
     CSS = """
@@ -31,11 +99,11 @@ class WorkspaceScreen(Screen):
         overflow: hidden;
         padding: 0;
     }
-    /* Horizontal split container - holds side-by-side terminals */
+    /* Horizontal container that holds side-by-side split terminals */
     WorkspaceScreen .split-h {
         height: 1fr;
     }
-    /* History search bar (docked top, hidden by default) */
+    /* History search bar (docked top, F3 to toggle) */
     WorkspaceScreen #history-search-bar {
         dock: top;
         height: 3;
@@ -71,6 +139,9 @@ class WorkspaceScreen(Screen):
         Binding("alt+p", "search_snippet", "Snippets", priority=True),
         Binding("ctrl+f", "file_transfer", "Files", priority=True),
         Binding("ctrl+b", "back_to_dash", "Dashboard", priority=True),
+        # F3/F5/F7 are also intercepted directly inside TerminalEmulator.on_key
+        # so they still work when the terminal has focus.  These fallback bindings
+        # fire when the history-search Input (or another widget) has focus.
         Binding("f3", "toggle_history_search", "Search History", priority=True),
         Binding("f5", "split_horizontal", "Split", priority=True),
         Binding("f7", "close_split", "Close Split", priority=True),
@@ -96,7 +167,7 @@ class WorkspaceScreen(Screen):
         self._scroll_hint: str = ""
         self._session_counter: int = 0
         # Split screen state
-        self._split_extras: dict[str, list[str]] = {}  # session_id → [extra terminal ids]
+        self._split_extras: dict[str, list[str]] = {}  # session_id → [extra term ids]
         self._split_counter: int = 0
         self._focused_term_id: str | None = None
         # History search state
@@ -108,7 +179,6 @@ class WorkspaceScreen(Screen):
         self._pending_connections.clear()
 
     def _next_session_id(self, conn: SSHConnection) -> str:
-        """Generate a unique session ID for a new tab."""
         self._session_counter += 1
         return f"{conn.id}-{self._session_counter}"
 
@@ -119,11 +189,11 @@ class WorkspaceScreen(Screen):
             self._pending_connections.append(conn)
 
     def compose(self) -> ComposeResult:
-        # History search overlay (F3 to toggle)
+        # History search bar overlay (F3 toggles it)
         with Horizontal(id="history-search-bar"):
             yield Static("🔍 Search:", classes="sh-label")
             yield Input(
-                placeholder="regex or keyword...  (Enter=next match,  Esc=close)",
+                placeholder="regex or keyword...  |  Enter = next match  |  Esc = close",
                 id="history-search-input",
             )
             yield Static("  F3 / Esc = close", classes="sh-hint")
@@ -131,8 +201,11 @@ class WorkspaceScreen(Screen):
             pass
         yield Static(" Idle", id="telemetry-status")
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # Session helpers
+    # ─────────────────────────────────────────────────────────────────────────
+
     def _get_active_session_id(self) -> str | None:
-        """Get the session_id of the currently active tab."""
         tabs = self.query("TabbedContent")
         if tabs:
             tc = tabs.first()
@@ -141,11 +214,48 @@ class WorkspaceScreen(Screen):
         return None
 
     def get_active_connection_id(self) -> str | None:
-        """Get the connection_id from the active tab's session."""
         session_id = self._get_active_session_id()
         if session_id and session_id in self._tabs_data:
             return self._tabs_data[session_id].id
         return None
+
+    def _get_active_terminal(self) -> TerminalEmulator | None:
+        """Return the currently focused TerminalEmulator (respects splits)."""
+        if self._focused_term_id:
+            try:
+                return self.query_one(f"#{self._focused_term_id}", TerminalEmulator)
+            except Exception:
+                pass
+        session_id = self._get_active_session_id()
+        if session_id:
+            try:
+                return self.query_one(f"#term-{session_id}", TerminalEmulator)
+            except Exception:
+                pass
+        return None
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Terminal emulator message handlers (F3/F5/F7 routed from terminal)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def on_terminal_emulator_request_history_search(
+        self, event: TerminalEmulator.RequestHistorySearch
+    ) -> None:
+        self.action_toggle_history_search()
+
+    def on_terminal_emulator_request_split_h(
+        self, event: TerminalEmulator.RequestSplitH
+    ) -> None:
+        self.action_split_horizontal()
+
+    def on_terminal_emulator_request_close_split(
+        self, event: TerminalEmulator.RequestCloseSplit
+    ) -> None:
+        self.action_close_split()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Tab lifecycle
+    # ─────────────────────────────────────────────────────────────────────────
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         self._scroll_hint = ""
@@ -160,13 +270,11 @@ class WorkspaceScreen(Screen):
                 pass
 
     def on_terminal_emulator_scroll_changed(self, event: TerminalEmulator.ScrollChanged) -> None:
-        """Update status bar when user scrolls in terminal history."""
         if event.offset > 0:
             self._scroll_hint = f" 📜 HISTORY ↑{event.offset} lines | Shift+End=return"
         else:
             self._scroll_hint = ""
-        session_id = self._get_active_session_id()
-        self._update_telemetry_bar(session_id)
+        self._update_telemetry_bar(self._get_active_session_id())
 
     def _update_telemetry_bar(self, session_id: str | None) -> None:
         try:
@@ -213,13 +321,11 @@ class WorkspaceScreen(Screen):
         try:
             channel = await self.app.ssh_manager.open_shell(connection.id)
             emulator = TerminalEmulator(channel, id=f"term-{session_id}")
-
-            # Wrap in Horizontal container so F5 can add split panes side-by-side
+            # Wrap in Horizontal so F5 can add side-by-side split terminals
             container = Horizontal(emulator, id=f"split-{session_id}", classes="split-h")
             await pane.mount(container)
             emulator.focus()
             self._focused_term_id = f"term-{session_id}"
-
             self._start_telemetry(session_id, connection)
         except Exception as e:
             await pane.mount(Static(f"Failed to connect: {e}"))
@@ -227,22 +333,43 @@ class WorkspaceScreen(Screen):
         self._update_telemetry_bar(session_id)
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Split screen (F5 = split horizontal, F7 = close splits)
+    # Split screen  (F5 = split, F7 = close splits)
     # ─────────────────────────────────────────────────────────────────────────
 
     @work
     async def action_split_horizontal(self) -> None:
-        """Open another shell for the same server side-by-side (F5)."""
+        """Open a new shell in a split pane beside the active terminal (F5).
+
+        If multiple connections are already open, shows a picker so the user
+        can choose which server to open in the split.
+        """
         session_id = self._get_active_session_id()
         if not session_id or session_id not in self._tabs_data:
             return
-        conn = self._tabs_data[session_id]
 
         try:
             container = self.query_one(f"#split-{session_id}", Horizontal)
         except Exception:
             self.notify("Cannot split this pane", severity="warning")
             return
+
+        # Gather unique active connections
+        seen: dict[str, SSHConnection] = {}
+        for conn in self._tabs_data.values():
+            seen[conn.id] = conn
+        unique_conns = list(seen.values())
+
+        if len(unique_conns) > 1:
+            # Show connection picker
+            chosen: SSHConnection | None = await self.app.push_screen_wait(
+                SplitConnectionPicker(unique_conns)
+            )
+            if chosen is None:
+                return  # User cancelled
+            conn = chosen
+        else:
+            # Only one active connection — split same server
+            conn = self._tabs_data[session_id]
 
         self._split_counter += 1
         extra_id = f"term-extra-{self._split_counter}"
@@ -260,7 +387,7 @@ class WorkspaceScreen(Screen):
             self.notify(f"Split failed: {e}", severity="error")
 
     def action_close_split(self) -> None:
-        """Remove all extra split terminals for the active tab (F7)."""
+        """Remove all split panes, keep only the primary terminal (F7)."""
         session_id = self._get_active_session_id()
         if not session_id:
             return
@@ -273,7 +400,6 @@ class WorkspaceScreen(Screen):
             except Exception:
                 pass
         self._split_extras[session_id] = []
-        # Refocus primary terminal
         self._focused_term_id = f"term-{session_id}"
         try:
             self.query_one(f"#term-{session_id}", TerminalEmulator).focus()
@@ -282,11 +408,11 @@ class WorkspaceScreen(Screen):
         self._update_telemetry_bar(session_id)
 
     # ─────────────────────────────────────────────────────────────────────────
-    # History search (F3)
+    # History search  (F3 = toggle)
     # ─────────────────────────────────────────────────────────────────────────
 
     def action_toggle_history_search(self) -> None:
-        """Show/hide the history search bar (F3)."""
+        """Show / hide the history search bar (F3)."""
         try:
             bar = self.query_one("#history-search-bar", Horizontal)
         except Exception:
@@ -305,15 +431,15 @@ class WorkspaceScreen(Screen):
             except Exception:
                 pass
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        if event.input.id == "history-search-input":
-            query = event.value.strip()
-            if query:
-                self._last_search = query
-            self._do_history_search(self._last_search)
+    @on(Input.Submitted, "#history-search-input")
+    def _on_search_submit(self, event: Input.Submitted) -> None:
+        query = event.value.strip()
+        if query:
+            self._last_search = query
+        self._do_history_search(self._last_search)
 
     def _do_history_search(self, query: str) -> None:
-        """Scan terminal history backward from current offset for a regex match."""
+        """Scan terminal history backward from the current view for a regex match."""
         if not query:
             return
         term = self._get_active_terminal()
@@ -326,7 +452,7 @@ class WorkspaceScreen(Screen):
             return
 
         total = term._pyte_screen.get_total_lines()
-        start = term._scroll_offset + 1  # search above current view
+        start = term._scroll_offset + 1  # start searching above current view
 
         for offset in range(start, total):
             abs_y = max(0, total - term._rows - offset)
@@ -334,13 +460,13 @@ class WorkspaceScreen(Screen):
             line_text = "".join(seg[0] for seg in segments).strip()
             if line_text and pattern.search(line_text):
                 term._set_scroll_offset(offset)
-                self.notify(f"Match ↑{offset} lines  (Enter=next)", timeout=1.5)
+                self.notify(f"Match  ↑{offset} lines  (Enter = next)", timeout=1.5)
                 return
 
         self.notify("No more matches", severity="warning", timeout=1.5)
 
     def on_key(self, event) -> None:
-        """Handle Escape to close history search bar."""
+        """Handle Esc to close history search bar (bubbles up from Input)."""
         if event.key == "escape":
             try:
                 bar = self.query_one("#history-search-bar", Horizontal)
@@ -354,7 +480,7 @@ class WorkspaceScreen(Screen):
                 pass
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Telemetry
+    # Telemetry background task
     # ─────────────────────────────────────────────────────────────────────────
 
     def _start_telemetry(self, session_id: str, conn: SSHConnection) -> None:
@@ -398,17 +524,16 @@ class WorkspaceScreen(Screen):
                         user, nice, system, idle, iowait = map(int, parts[1:6])
                     except ValueError:
                         continue
-                    total = user + nice + system + idle + iowait
+                    total_j = user + nice + system + idle + iowait
                     idle_t = idle + iowait
-                    if session_id not in self._last_stats:
-                        self._last_stats[session_id] = {}
-                    if "last_total" in self._last_stats[session_id]:
-                        dt = total - self._last_stats[session_id]["last_total"]
-                        di = idle_t - self._last_stats[session_id]["last_idle"]
+                    s = self._last_stats.setdefault(session_id, {})
+                    if "last_total" in s:
+                        dt = total_j - s["last_total"]
+                        di = idle_t - s["last_idle"]
                         if dt > 0:
                             cpu_usage = (dt - di) / dt * 100
-                    self._last_stats[session_id]["last_total"] = total
-                    self._last_stats[session_id]["last_idle"] = idle_t
+                    s["last_total"] = total_j
+                    s["last_idle"] = idle_t
             elif line.startswith("MemTotal:"):
                 try:
                     mem_total = int(line.split()[1])
@@ -445,9 +570,7 @@ class WorkspaceScreen(Screen):
             return f"{b/1024:.1f}KB/s"
 
         rx_rate_str = tx_rate_str = "0KB/s"
-        if session_id not in self._last_stats:
-            self._last_stats[session_id] = {}
-        stats = self._last_stats[session_id]
+        stats = self._last_stats.setdefault(session_id, {})
         if "last_rx" in stats and "last_ts" in stats:
             dt = now - stats["last_ts"]
             if dt > 0:
@@ -482,24 +605,20 @@ class WorkspaceScreen(Screen):
             term.focus()
 
     def action_disconnect_tab(self, _conn_id: str = None) -> None:
-        """Close the currently active tab/session."""
         session_id = self._get_active_session_id()
         if session_id:
             self._close_session(session_id)
 
     def _close_session(self, session_id: str) -> None:
-        """Close a specific session tab and clean up resources."""
         if session_id not in self._tabs_data:
             return
-
         conn = self._tabs_data[session_id]
 
-        # Cancel telemetry task
         if session_id in self._telemetry_tasks:
             self._telemetry_tasks[session_id].cancel()
             del self._telemetry_tasks[session_id]
 
-        # Stop all extra (split) terminals
+        # Stop all split terminals
         for term_id in self._split_extras.pop(session_id, []):
             try:
                 t = self.query_one(f"#{term_id}", TerminalEmulator)
@@ -508,7 +627,7 @@ class WorkspaceScreen(Screen):
             except Exception:
                 pass
 
-        # Stop the primary terminal emulator
+        # Stop the primary terminal
         try:
             term = self.query_one(f"#term-{session_id}", TerminalEmulator)
             term.stop()
@@ -519,7 +638,6 @@ class WorkspaceScreen(Screen):
         self._telemetry_data.pop(session_id, None)
         self._last_stats.pop(session_id, None)
 
-        # Disconnect SSH only if no other tab uses it
         other = [sid for sid, c in self._tabs_data.items() if c.id == conn.id]
         if not other:
             self.app.ssh_manager.disconnect(conn.id)
@@ -541,7 +659,6 @@ class WorkspaceScreen(Screen):
     # ─────────────────────────────────────────────────────────────────────────
 
     def action_file_transfer(self) -> None:
-        """Handle file transfers for the active tab."""
         conn_id = self.get_active_connection_id()
         if conn_id:
             conn = self._tabs_data.get(self._get_active_session_id())
@@ -551,7 +668,6 @@ class WorkspaceScreen(Screen):
 
     @work
     async def action_search_snippet(self) -> None:
-        """Open the snippet palette and inject the result into the terminal."""
         from ssh_term.screens.snippet_palette import SnippetPaletteScreen
         content = await self.app.push_screen_wait(SnippetPaletteScreen(self.app.config_manager))
         if content:
@@ -559,9 +675,9 @@ class WorkspaceScreen(Screen):
             session_id = tc.active.replace("tab-", "")
             if session_id:
                 try:
-                    cleaned_content = content.rstrip("\r\n")
+                    cleaned = content.rstrip("\r\n")
                     term = self.query_one(f"#term-{session_id}", TerminalEmulator)
-                    term.write_stdin(cleaned_content)
+                    term.write_stdin(cleaned)
                 except Exception as e:
                     self.notify(f"Failed to inject snippet: {e}", severity="error")
 
@@ -571,22 +687,6 @@ class WorkspaceScreen(Screen):
     # ─────────────────────────────────────────────────────────────────────────
     # History scrolling
     # ─────────────────────────────────────────────────────────────────────────
-
-    def _get_active_terminal(self) -> TerminalEmulator | None:
-        # Prefer the explicitly focused terminal (for splits)
-        if self._focused_term_id:
-            try:
-                return self.query_one(f"#{self._focused_term_id}", TerminalEmulator)
-            except Exception:
-                pass
-        # Fall back to the primary terminal of the active tab
-        session_id = self._get_active_session_id()
-        if session_id:
-            try:
-                return self.query_one(f"#term-{session_id}", TerminalEmulator)
-            except Exception:
-                pass
-        return None
 
     def action_scroll_history_up(self) -> None:
         term = self._get_active_terminal()
@@ -609,14 +709,12 @@ class WorkspaceScreen(Screen):
             term._set_scroll_offset(0)
 
     def on_mouse_scroll_up(self, event) -> None:
-        """Screen-level fallback: forward scroll to active terminal."""
         term = self._get_active_terminal()
         if term:
             event.stop()
             term._set_scroll_offset(term._scroll_offset + 3)
 
     def on_mouse_scroll_down(self, event) -> None:
-        """Screen-level fallback: forward scroll to active terminal."""
         term = self._get_active_terminal()
         if term:
             event.stop()
