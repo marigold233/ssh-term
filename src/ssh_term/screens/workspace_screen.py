@@ -101,6 +101,7 @@ class WorkspaceScreen(Screen):
     }
     /* Horizontal container that holds side-by-side split terminals */
     WorkspaceScreen .split-h {
+        width: 1fr;
         height: 1fr;
     }
     /* History search bar (docked top, F3 to toggle) */
@@ -235,25 +236,6 @@ class WorkspaceScreen(Screen):
         return None
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Terminal emulator message handlers (F3/F5/F7 routed from terminal)
-    # ─────────────────────────────────────────────────────────────────────────
-
-    def on_terminal_emulator_request_history_search(
-        self, event: TerminalEmulator.RequestHistorySearch
-    ) -> None:
-        self.action_toggle_history_search()
-
-    def on_terminal_emulator_request_split_h(
-        self, event: TerminalEmulator.RequestSplitH
-    ) -> None:
-        self.action_split_horizontal()
-
-    def on_terminal_emulator_request_close_split(
-        self, event: TerminalEmulator.RequestCloseSplit
-    ) -> None:
-        self.action_close_split()
-
-    # ─────────────────────────────────────────────────────────────────────────
     # Tab lifecycle
     # ─────────────────────────────────────────────────────────────────────────
 
@@ -340,11 +322,12 @@ class WorkspaceScreen(Screen):
     async def action_split_horizontal(self) -> None:
         """Open a new shell in a split pane beside the active terminal (F5).
 
-        If multiple connections are already open, shows a picker so the user
-        can choose which server to open in the split.
+        Always shows a picker so the user has visible confirmation and the
+        ability to open any already-connected server in the split pane.
         """
         session_id = self._get_active_session_id()
         if not session_id or session_id not in self._tabs_data:
+            self.notify("No active terminal to split", severity="warning")
             return
 
         try:
@@ -492,13 +475,14 @@ class WorkspaceScreen(Screen):
             while session_id in self._tabs_data:
                 if self._get_active_session_id() == session_id:
                     try:
-                        res = await client.run(cmd)
+                        res = await asyncio.wait_for(client.run(cmd), timeout=2.0)
                         out = res.stdout if hasattr(res, "stdout") else ""
                         parsed = self._parse_telemetry(session_id, str(out))
                         self._telemetry_data[session_id] = parsed
                         self._update_telemetry_bar(session_id)
-                    except asyncio.CancelledError:
-                        return
+                    except (asyncio.CancelledError, asyncio.TimeoutError):
+                        self._telemetry_data[session_id] = "Telemetry: Timeout"
+                        self._update_telemetry_bar(session_id)
                     except Exception as e:
                         self._telemetry_data[session_id] = f"Telemetry Error: {type(e).__name__}"
                         self._update_telemetry_bar(session_id)

@@ -218,10 +218,16 @@ class BatchExecuteScreen(Screen):
 
         if action_type in ("command", "snippet"):
             log.write(Syntax(cmd_to_run, "bash", theme="monokai", word_wrap=True))
+            sem = asyncio.Semaphore(10)
+
+            async def wrapped_exec(c: SSHConnection):
+                async with sem:
+                    await self.exec_on_conn(c, cmd_to_run, use_sudo)
+
             tasks = []
             for c in matched_conns:
                 if is_async:
-                    task = asyncio.create_task(self.exec_on_conn(c, cmd_to_run, use_sudo))
+                    task = asyncio.create_task(wrapped_exec(c))
                     tasks.append(task)
                 else:
                     await self.exec_on_conn(c, cmd_to_run, use_sudo)
@@ -243,10 +249,16 @@ class BatchExecuteScreen(Screen):
                 
         elif action_type == "upload":
             log.write(f"[bold cyan]Initiating Batch Upload: {upload_local} -> {upload_remote}[/]")
+            sem = asyncio.Semaphore(5)  # Fewer concurrent uploads as they are IO heavy
+
+            async def wrapped_upload(c: SSHConnection):
+                async with sem:
+                    await self.upload_on_conn(c, upload_local, upload_remote)
+
             tasks = []
             for c in matched_conns:
                 if is_async:
-                    task = asyncio.create_task(self.upload_on_conn(c, upload_local, upload_remote))
+                    task = asyncio.create_task(wrapped_upload(c))
                     tasks.append(task)
                 else:
                     await self.upload_on_conn(c, upload_local, upload_remote)
@@ -306,10 +318,16 @@ class BatchExecuteScreen(Screen):
             
             if stdout:
                 log.write(f"[bold green][{conn.name}] STDOUT:[/]")
-                log.write(Syntax(str(stdout), "bash", theme="monokai", word_wrap=True))
+                out_str = str(stdout)
+                if len(out_str) > 10000:
+                    out_str = out_str[:10000] + "\n... [Output Truncated for Performance] ..."
+                log.write(Syntax(out_str, "bash", theme="monokai", word_wrap=True))
             if stderr:
                 log.write(f"[bold red][{conn.name}] STDERR:[/]")
-                log.write(str(stderr))
+                err_str = str(stderr)
+                if len(err_str) > 5000:
+                    err_str = err_str[:5000] + "\n... [Error Truncated] ..."
+                log.write(err_str)
                 
             if not stdout and not stderr:
                 log.write(f"[dim][{conn.name}] completed with no output.[/]")

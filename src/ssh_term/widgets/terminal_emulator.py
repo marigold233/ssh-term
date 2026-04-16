@@ -5,11 +5,14 @@ from __future__ import annotations
 import asyncio
 import asyncssh
 import ssh_term.rs_term as rs_term
-from rich.text import Text
+from rich.segment import Segment
+from rich.style import Style
+from functools import lru_cache
 from textual import work
 from textual.widget import Widget
 from textual.strip import Strip
-from textual.events import Key, Resize
+from textual.geometry import Region
+from textual.events import Key, Resize, Paste
 
 from ssh_term.theme import TERMINAL_FG, TERMINAL_BG, TERMINAL_ANSI
 
@@ -48,25 +51,23 @@ def _get_256_color(n: int) -> str:
         return f"#{v:02x}{v:02x}{v:02x}"
     return ""
 
-def _resolve_color(color: str, default: str) -> str:
-    if not color or color == "default":
-        return default
-    if color in _PYTE_COLOR_MAP:
-        return _PYTE_COLOR_MAP[color]
-    if color.startswith("color"):
-        try:
-            return _get_256_color(int(color[5:]))
-        except ValueError:
-            pass
-    if len(color) == 6 or len(color) == 7:
-        if color.startswith("#"):
-            return color
-        try:
-            int(color, 16)
-            return f"#{color}"
-        except ValueError:
-            pass
-    return default
+@lru_cache(maxsize=1024)
+def _get_rich_style(fg_tup: tuple, bg_tup: tuple, bold: bool, italics: bool, underscore: bool) -> Style:
+    def _parse(tup, is_bg):
+        t, v1, v2, v3 = tup
+        if t == 1:
+            return _get_256_color(v1)
+        elif t == 2:
+            return f"#{v1:02x}{v2:02x}{v3:02x}"
+        return TERMINAL_BG if is_bg else TERMINAL_FG
+
+    return Style(
+        color=_parse(fg_tup, False),
+        bgcolor=_parse(bg_tup, True),
+        bold=bold,
+        italic=italics,
+        underline=underscore
+    )
 
 
 class TerminalEmulator(Widget, can_focus=True):
@@ -93,17 +94,6 @@ class TerminalEmulator(Widget, can_focus=True):
             self.offset = offset
             self.max_offset = max_offset
 
-    class RequestHistorySearch(Message):
-        """User pressed F3 — request to open history search bar."""
-        pass
-
-    class RequestSplitH(Message):
-        """User pressed F5 — request a horizontal split pane."""
-        pass
-
-    class RequestCloseSplit(Message):
-        """User pressed F7 — request to close split panes."""
-        pass
 
     def __init__(self, process: asyncssh.SSHClientProcess, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -115,10 +105,41 @@ class TerminalEmulator(Widget, can_focus=True):
         self._stop_process = False
         self._cursor_visible = True
         self._scroll_offset = 0  # 0 = at bottom (live view), >0 = scrolled up N lines
+        self._full_redraw = False
+        self._terminal_updated = False
+        self._blank_strip = None
 
     def on_mount(self) -> None:
         self.set_interval(0.5, self._toggle_cursor)
+        self.set_interval(1 / 60, self._render_tick)
         self._read_channel()
+
+    @property
+    def blank_strip(self) -> Strip:
+        if not self._blank_strip or self._blank_strip.length != self._cols:
+            self._blank_strip = Strip.blank(self._cols, Style(bgcolor=TERMINAL_BG))
+        return self._blank_strip
+
+    def _render_tick(self) -> None:
+        if self._full_redraw:
+            self._full_redraw = False
+            self._terminal_updated = False
+            try: self._pyte_screen.get_and_clear_dirty_lines()
+            except Exception: pass
+            self.refresh()
+        elif self._terminal_updated:
+            self._terminal_updated = False
+            try:
+                lines = self._pyte_screen.get_and_clear_dirty_lines()
+            except Exception:
+                lines = None  # fallback if Rust extension isn't recompiled yet
+            
+            if self._scroll_offset != 0 or lines is None:
+                self.refresh()
+            else:
+                for y in lines:
+                    if y < self._rows:
+                        self.refresh(Region(0, y, self._cols, 1))
 
     def _toggle_cursor(self) -> None:
         self._cursor_visible = not self._cursor_visible
@@ -137,7 +158,7 @@ class TerminalEmulator(Widget, can_focus=True):
                 # When new data arrives and user is at/near bottom, stay at bottom
                 if self._scroll_offset <= 2:
                     self._scroll_offset = 0
-                self.refresh()
+                self._terminal_updated = True
         except Exception:
             pass
         self._on_disconnect()
@@ -156,8 +177,8 @@ class TerminalEmulator(Widget, can_focus=True):
         old = self._scroll_offset
         self._scroll_offset = max(0, min(self._max_scroll_offset, value))
         if self._scroll_offset != old:
+            self._full_redraw = True
             self.post_message(self.ScrollChanged(self._scroll_offset, self._max_scroll_offset))
-            self.refresh()
 
     def render_line(self, y: int) -> Strip:
         """Render a single visible line.
@@ -173,33 +194,17 @@ class TerminalEmulator(Widget, can_focus=True):
         absolute_y = start_line + y
 
         if absolute_y >= total or absolute_y < 0:
-            try:
-                style = self.app.console.get_style(f"on {TERMINAL_BG}")
-                return Strip.blank(self._cols, style)
-            except Exception:
-                return Strip.blank(self._cols)
+            return self.blank_strip
 
-        text = Text()
-        for chunk, fg, bg, bold, italics, underscore, inverse, is_cursor in self._pyte_screen.get_line_segments(absolute_y):
-            fg_res = _resolve_color(fg, TERMINAL_FG)
-            bg_res = _resolve_color(bg, TERMINAL_BG)
-            # Only show cursor when viewing the live (bottom) view
+        segs: list[Segment] = []
+        for chunk, fg_tup, bg_tup, bold, italics, underscore, inverse, is_cursor in self._pyte_screen.get_line_segments(absolute_y):
             if (is_cursor and self._cursor_visible and self._scroll_offset == 0) or inverse:
-                fg_res, bg_res = bg_res, fg_res
-            style_str = f"{fg_res} on {bg_res}"
-            if bold:
-                style_str += " bold"
-            if italics:
-                style_str += " italic"
-            if underscore:
-                style_str += " underline"
-            text.append(chunk, style=style_str)
+                fg_tup, bg_tup = bg_tup, fg_tup
+            
+            style = _get_rich_style(fg_tup, bg_tup, bold, italics, underscore)
+            segs.append(Segment(chunk, style))
 
-        try:
-            segments = list(text.render(self.app.console))
-        except Exception:
-            return Strip.blank(self._cols)
-        return Strip(segments, self._cols)
+        return Strip(segs, self._cols)
 
     def on_key(self, event: Key) -> None:
         key = event.key
@@ -229,16 +234,26 @@ class TerminalEmulator(Widget, can_focus=True):
         event.stop()
         event.prevent_default()
 
-        # ── Function-key workspace commands (intercepted here so they are NOT
-        #    forwarded to the remote pty; messages bubble up to WorkspaceScreen)
+        # ── Function-key workspace commands — intercepted here so they are NOT
+        #    forwarded to the remote pty. We call the screen's actions directly
+        #    which is more reliable than message bubbling.
         if key == "f3":
-            self.post_message(self.RequestHistorySearch())
+            try:
+                self.screen.action_toggle_history_search()  # type: ignore[attr-defined]
+            except Exception:
+                pass
             return
         elif key == "f5":
-            self.post_message(self.RequestSplitH())
+            try:
+                self.screen.action_split_horizontal()  # type: ignore[attr-defined]
+            except Exception:
+                pass
             return
         elif key == "f7":
-            self.post_message(self.RequestCloseSplit())
+            try:
+                self.screen.action_close_split()  # type: ignore[attr-defined]
+            except Exception:
+                pass
             return
 
         key_map = {
@@ -286,8 +301,9 @@ class TerminalEmulator(Widget, can_focus=True):
                 # Snap back to live view on any keypress
                 if self._scroll_offset != 0:
                     self._scroll_offset = 0
+                    self._full_redraw = True
                     self.post_message(self.ScrollChanged(0, self._max_scroll_offset))
-                self.refresh()
+                self._terminal_updated = True
             except Exception:
                 pass
 
@@ -299,10 +315,19 @@ class TerminalEmulator(Widget, can_focus=True):
             # Snap back to live view
             if self._scroll_offset != 0:
                 self._scroll_offset = 0
+                self._full_redraw = True
                 self.post_message(self.ScrollChanged(0, self._max_scroll_offset))
-            self.refresh()
+            self._terminal_updated = True
         except Exception as e:
             pass
+
+    def on_paste(self, event: Paste) -> None:
+        """Handle paste events by sending the text into the terminal."""
+        if event.text:
+            if getattr(self._pyte_screen, "bracketed_paste", False):
+                self.write_stdin(f"\x1b[200~{event.text}\x1b[201~")
+            else:
+                self.write_stdin(event.text)
 
     def on_mouse_scroll_up(self, event) -> None:
         """Scroll up into history."""

@@ -1,22 +1,21 @@
 use pyo3::prelude::*;
 use std::collections::VecDeque;
 use vte::{Params, Parser, Perform};
+use unicode_width::UnicodeWidthChar;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Color {
     Default,
-    Named(&'static str),
     Indexed(u8),
     Rgb(u8, u8, u8),
 }
 
 impl Color {
-    fn to_string_repr(&self) -> String {
+    fn to_tuple(&self) -> (u8, u8, u8, u8) {
         match self {
-            Color::Default => "default".to_string(),
-            Color::Named(name) => name.to_string(),
-            Color::Indexed(idx) => format!("color{}", idx),
-            Color::Rgb(r, g, b) => format!("#{:02x}{:02x}{:02x}", r, g, b),
+            Color::Default => (0, 0, 0, 0),
+            Color::Indexed(idx) => (1, *idx, 0, 0),
+            Color::Rgb(r, g, b) => (2, *r, *g, *b),
         }
     }
 }
@@ -97,6 +96,12 @@ pub struct Screen {
     scrollback_buffer: VecDeque<Vec<PyChar>>,
     current_style: CurrentStyle,
     margins: Option<(usize, usize)>,
+    row_pool: Vec<Vec<PyChar>>,
+    alt_buffer: Option<VecDeque<Vec<PyChar>>>,
+    alt_cursor: Option<PyCursor>,
+    dirty_lines: Vec<bool>,
+    #[pyo3(get)]
+    pub bracketed_paste: bool,
 }
 
 #[pymethods]
@@ -117,6 +122,11 @@ impl Screen {
             scrollback_buffer: VecDeque::new(),
             current_style: CurrentStyle::default(),
             margins: None,
+            row_pool: Vec::with_capacity(500),
+            alt_buffer: None,
+            alt_cursor: None,
+            dirty_lines: vec![true; lines],
+            bracketed_paste: false,
         }
     }
 
@@ -125,9 +135,21 @@ impl Screen {
         let columns = std::cmp::max(1, columns);
         self.lines = lines;
         self.columns = columns;
-        self.buffer.resize_with(lines, || vec![PyChar::default(); columns]);
+        let old_lines = self.buffer.len();
+        if lines > old_lines {
+            for _ in old_lines..lines {
+                let row = self.blank_row();
+                self.buffer.push_back(row);
+            }
+        } else if lines < old_lines {
+            for _ in lines..old_lines {
+                if let Some(mut r) = self.buffer.pop_back() {
+                    if self.row_pool.len() < 500 { self.row_pool.push(r); }
+                }
+            }
+        }
         for row in self.buffer.iter_mut() {
-            row.resize(columns, PyChar::default());
+            row.resize(columns, self.blank_char());
         }
         if self.cursor.y >= lines {
             self.cursor.y = lines.saturating_sub(1);
@@ -136,13 +158,46 @@ impl Screen {
             self.cursor.x = columns.saturating_sub(1);
         }
         self.margins = None;
+        self.dirty_lines.resize(lines, true);
+        for i in 0..lines { self.dirty_lines[i] = true; }
+    }
+
+    
+    #[pyo3(signature=())]
+    pub fn get_and_clear_dirty_lines(&mut self) -> Vec<usize> {
+        let mut dirty = Vec::new();
+        for (i, d) in self.dirty_lines.iter_mut().enumerate() {
+            if *d {
+                dirty.push(i);
+                *d = false;
+            }
+        }
+        dirty
+    }
+
+    fn blank_row(&mut self) -> Vec<PyChar> {
+        if let Some(mut row) = self.row_pool.pop() {
+            row.resize(self.columns, self.blank_char());
+            for cell in row.iter_mut() {
+                *cell = self.blank_char();
+            }
+            row
+        } else {
+            vec![self.blank_char(); self.columns]
+        }
+    }
+
+    fn mark_dirty(&mut self, y: usize) {
+        if y < self.lines {
+            self.dirty_lines[y] = true;
+        }
     }
 
     pub fn get_total_lines(&self) -> usize {
         self.scrollback_buffer.len() + self.lines
     }
 
-    pub fn get_line_segments(&self, y: usize) -> Vec<(String, String, String, bool, bool, bool, bool, bool)> {
+    pub fn get_line_segments(&self, y: usize) -> Vec<(String, (u8, u8, u8, u8), (u8, u8, u8, u8), bool, bool, bool, bool, bool)> {
         let mut segments = Vec::new();
         let total = self.scrollback_buffer.len() + self.lines;
         if y >= total {
@@ -169,6 +224,7 @@ impl Screen {
         let mut current_style: Option<(Color, Color, bool, bool, bool, bool, bool)> = None;
 
         for (x, cell) in row.iter().enumerate() {
+            if cell.data == '\0' { continue; } // skip wide-char dummy cells
             let is_cursor = !in_history && (y - self.scrollback_buffer.len()) == self.cursor.y && x == self.cursor.x;
             
             let style = (cell.fg, cell.bg, cell.bold, cell.italics, cell.underscore, cell.inverse, is_cursor);
@@ -179,8 +235,8 @@ impl Screen {
                 } else {
                     segments.push((
                         current_text.clone(),
-                        cs.0.to_string_repr(),
-                        cs.1.to_string_repr(),
+                        cs.0.to_tuple(),
+                        cs.1.to_tuple(),
                         cs.2,
                         cs.3,
                         cs.4,
@@ -201,8 +257,8 @@ impl Screen {
             if !current_text.is_empty() {
                 segments.push((
                     current_text,
-                    cs.0.to_string_repr(),
-                    cs.1.to_string_repr(),
+                    cs.0.to_tuple(),
+                    cs.1.to_tuple(),
                     cs.2,
                     cs.3,
                     cs.4,
@@ -242,23 +298,38 @@ impl Screen {
             if let Some(dropped) = self.buffer.pop_front() {
                 self.scrollback_buffer.push_back(dropped);
                 if self.scrollback_buffer.len() > 5000 {
-                    self.scrollback_buffer.pop_front();
+                    if let Some(recycled) = self.scrollback_buffer.pop_front() {
+                        if self.row_pool.len() < 500 { self.row_pool.push(recycled); }
+                    }
                 }
             }
-            self.buffer.push_back(vec![self.blank_char(); self.columns]);
+            let new_row = self.blank_row();
+            self.buffer.push_back(new_row);
         } else {
             if top <= bottom && bottom < self.buffer.len() {
-                self.buffer.remove(top);
-                self.buffer.insert(bottom, vec![self.blank_char(); self.columns]);
+                if let Some(dropped) = self.buffer.remove(top) {
+                    if self.row_pool.len() < 500 { self.row_pool.push(dropped); }
+                }
+                let new_row = self.blank_row();
+                self.buffer.insert(bottom, new_row);
             }
+        }
+        for i in top..=bottom {
+            self.mark_dirty(i);
         }
     }
 
     fn scroll_down(&mut self) {
         let (top, bottom) = self.get_margins();
         if top <= bottom && bottom < self.buffer.len() {
-            self.buffer.remove(bottom);
-            self.buffer.insert(top, vec![self.blank_char(); self.columns]);
+            if let Some(dropped) = self.buffer.remove(bottom) {
+                if self.row_pool.len() < 500 { self.row_pool.push(dropped); }
+            }
+            let new_row = self.blank_row();
+            self.buffer.insert(top, new_row);
+            for i in top..=bottom {
+                self.mark_dirty(i);
+            }
         }
     }
 
@@ -285,9 +356,15 @@ impl Screen {
         if self.cursor.y < top || self.cursor.y > bottom { return; }
         for _ in 0..count {
             if bottom < self.buffer.len() {
-                self.buffer.remove(bottom);
-                self.buffer.insert(self.cursor.y, vec![self.blank_char(); self.columns]);
+                if let Some(dropped) = self.buffer.remove(bottom) {
+                    if self.row_pool.len() < 500 { self.row_pool.push(dropped); }
+                }
+                let new_row = self.blank_row();
+                self.buffer.insert(self.cursor.y, new_row);
             }
+        }
+        for i in self.cursor.y..=bottom {
+            self.mark_dirty(i);
         }
     }
 
@@ -296,16 +373,25 @@ impl Screen {
         if self.cursor.y < top || self.cursor.y > bottom { return; }
         for _ in 0..count {
             if self.cursor.y < self.buffer.len() {
-                self.buffer.remove(self.cursor.y);
-                self.buffer.insert(bottom, vec![self.blank_char(); self.columns]);
+                if let Some(dropped) = self.buffer.remove(self.cursor.y) {
+                    if self.row_pool.len() < 500 { self.row_pool.push(dropped); }
+                }
+                let new_row = self.blank_row();
+                self.buffer.insert(bottom, new_row);
             }
+        }
+        for i in self.cursor.y..=bottom {
+            self.mark_dirty(i);
         }
     }
 }
 
 impl Perform for Screen {
     fn print(&mut self, c: char) {
-        if self.cursor.x >= self.columns {
+        let w = c.width().unwrap_or(1);
+        if w == 0 { return; } // ignore zero-width characters for now
+
+        if self.cursor.x + w > self.columns {
             self.cursor.x = 0;
             self.newline();
         }
@@ -322,15 +408,36 @@ impl Perform for Screen {
                 cell.italics = self.current_style.italics;
                 cell.underscore = self.current_style.underscore;
                 cell.inverse = self.current_style.inverse;
+
+                if w > 1 {
+                    for i in 1..w {
+                        if x + i < row.len() {
+                            let dummy = &mut row[x+i];
+                            dummy.data = '\0';
+                            dummy.fg = self.current_style.fg;
+                            dummy.bg = self.current_style.bg;
+                        }
+                    }
+                }
             }
         }
-        self.cursor.x += 1;
+        self.cursor.x += w;
+        let cy = self.cursor.y;
+        self.mark_dirty(cy);
     }
 
     fn execute(&mut self, byte: u8) {
         match byte {
-            b'\n' | b'\x0B' | b'\x0C' => self.newline(),
-            b'\r' => self.cursor.x = 0,
+            b'\n' | b'\x0B' | b'\x0C' => {
+                let cy = self.cursor.y;
+                self.newline();
+                self.mark_dirty(cy);
+                let ny = self.cursor.y;
+                self.mark_dirty(ny);
+            }
+            b'\r' => {
+                self.cursor.x = 0;
+            }
             b'\x08' => {
                 if self.cursor.x > 0 {
                     self.cursor.x -= 1;
@@ -342,8 +449,20 @@ impl Perform for Screen {
 
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
         match (intermediates, byte) {
-            (&[], b'M') => self.reverse_index(),
-            (&[], b'D') => self.newline(),
+            (&[], b'M') => {
+                let cy = self.cursor.y;
+                self.reverse_index();
+                self.mark_dirty(cy);
+                let ny = self.cursor.y;
+                self.mark_dirty(ny);
+            }
+            (&[], b'D') => {
+                let cy = self.cursor.y;
+                self.newline();
+                self.mark_dirty(cy);
+                let ny = self.cursor.y;
+                self.mark_dirty(ny);
+            }
             _ => {}
         }
     }
@@ -362,6 +481,36 @@ impl Perform for Screen {
         };
 
         match action {
+            'h' | 'l' => {
+                let is_set = action == 'h';
+                if _intermediates.starts_with(b"?") {
+                    let param = get_param(0, 0);
+                    if param == 1049 {
+                        if is_set {
+                            if self.alt_buffer.is_none() {
+                                let mut alt = VecDeque::with_capacity(self.lines);
+                                for _ in 0..self.lines { alt.push_back(self.blank_row()); }
+                                self.alt_buffer = Some(std::mem::take(&mut self.buffer));
+                                self.buffer = alt;
+                                self.alt_cursor = Some(self.cursor.clone());
+                                self.cursor.x = 0;
+                                self.cursor.y = 0;
+                                for i in 0..self.lines { self.mark_dirty(i); }
+                            }
+                        } else {
+                            if let Some(alt) = self.alt_buffer.take() {
+                                let discarded = std::mem::take(&mut self.buffer);
+                                for r in discarded { if self.row_pool.len() < 500 { self.row_pool.push(r); } }
+                                self.buffer = alt;
+                                if let Some(c) = self.alt_cursor.take() { self.cursor = c; }
+                                for i in 0..self.lines { self.mark_dirty(i); }
+                            }
+                        }
+                    } else if param == 2004 {
+                        self.bracketed_paste = is_set;
+                    }
+                }
+            }
             'A' => { // Cursor Up
                 let n = get_param(0, 1) as usize;
                 self.cursor.y = self.cursor.y.saturating_sub(n);
@@ -509,8 +658,7 @@ impl Perform for Screen {
                         24 => self.current_style.underscore = false,
                         27 => self.current_style.inverse = false,
                         30..=37 => {
-                            let colors = ["black", "red", "green", "brown", "blue", "magenta", "cyan", "white"];
-                            self.current_style.fg = Color::Named(colors[(code - 30) as usize]);
+                            self.current_style.fg = Color::Indexed(code - 30);
                         }
                         38 => {
                             if i + 2 < flat_params.len() && flat_params[i+1] == 5 {
@@ -523,8 +671,7 @@ impl Perform for Screen {
                         }
                         39 => self.current_style.fg = Color::Default,
                         40..=47 => {
-                            let colors = ["black", "red", "green", "brown", "blue", "magenta", "cyan", "white"];
-                            self.current_style.bg = Color::Named(colors[(code - 40) as usize]);
+                            self.current_style.bg = Color::Indexed(code - 40);
                         }
                         48 => {
                             if i + 2 < flat_params.len() && flat_params[i+1] == 5 {
@@ -537,12 +684,10 @@ impl Perform for Screen {
                         }
                         49 => self.current_style.bg = Color::Default,
                         90..=97 => {
-                            let colors = ["brightblack", "brightred", "brightgreen", "brightyellow", "brightblue", "brightmagenta", "brightcyan", "brightwhite"];
-                            self.current_style.fg = Color::Named(colors[(code - 90) as usize]);
+                            self.current_style.fg = Color::Indexed(code - 90 + 8);
                         }
                         100..=107 => {
-                            let colors = ["brightblack", "brightred", "brightgreen", "brightyellow", "brightblue", "brightmagenta", "brightcyan", "brightwhite"];
-                            self.current_style.bg = Color::Named(colors[(code - 100) as usize]);
+                            self.current_style.bg = Color::Indexed(code - 100 + 8);
                         }
                         _ => {}
                     }

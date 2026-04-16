@@ -123,7 +123,11 @@ class SSHManager:
         return client
 
     def get_client(self, conn_id: str) -> asyncssh.SSHClientConnection | None:
-        return self._clients.get(conn_id)
+        client = self._clients.get(conn_id)
+        if client and client.is_closing():
+            self._clients.pop(conn_id, None)
+            return None
+        return client
 
     async def open_shell(
         self, conn_id: str, cols: int = 80, rows: int = 24

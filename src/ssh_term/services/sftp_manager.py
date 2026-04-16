@@ -78,37 +78,17 @@ class SFTPManager:
         self,
         local_dir: str,
         remote_dir: str,
-    ) -> int:
-        """Upload a directory recursively. Returns number of files transferred."""
-        count = 0
-        for dirpath, dirnames, filenames in os.walk(local_dir):
-            rel = os.path.relpath(dirpath, local_dir)
-            remote_sub = remote_dir if rel == "." else remote_dir.rstrip("/") + "/" + rel.replace(os.sep, "/")
-            await self.mkdir(remote_sub)
-            for fname in filenames:
-                local_file = os.path.join(dirpath, fname)
-                remote_file = remote_sub.rstrip("/") + "/" + fname
-                await self.sftp.put(local_file, remote_file)
-                count += 1
-        return count
+    ) -> None:
+        """Upload a directory recursively."""
+        await self.sftp.put(local_dir, remote_dir, recurse=True)
 
     async def download_recursive(
         self,
         remote_dir: str,
         local_dir: str,
-    ) -> int:
-        """Download a directory recursively. Returns number of files transferred."""
-        count = 0
-        Path(local_dir).mkdir(parents=True, exist_ok=True)
-        for entry in await self.listdir(remote_dir):
-            if entry.is_dir:
-                sub_local = os.path.join(local_dir, entry.name)
-                count += await self.download_recursive(entry.path, sub_local)
-            else:
-                local_file = os.path.join(local_dir, entry.name)
-                await self.sftp.get(entry.path, local_file)
-                count += 1
-        return count
+    ) -> None:
+        """Download a directory recursively."""
+        await self.sftp.get(remote_dir, local_dir, recurse=True)
 
     async def cwd(self) -> str:
         # get_realpath converts . to absolute path roughly
