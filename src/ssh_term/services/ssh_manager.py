@@ -124,7 +124,7 @@ class SSHManager:
 
     def get_client(self, conn_id: str) -> asyncssh.SSHClientConnection | None:
         client = self._clients.get(conn_id)
-        if client and client.is_closing():
+        if client and client.is_closed():
             self._clients.pop(conn_id, None)
             return None
         return client

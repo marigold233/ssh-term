@@ -108,6 +108,7 @@ class TerminalEmulator(Widget, can_focus=True):
         self._full_redraw = False
         self._terminal_updated = False
         self._blank_strip = None
+        self._blank_strip_cols = -1
 
     def on_mount(self) -> None:
         self.set_interval(0.5, self._toggle_cursor)
@@ -116,8 +117,9 @@ class TerminalEmulator(Widget, can_focus=True):
 
     @property
     def blank_strip(self) -> Strip:
-        if not self._blank_strip or self._blank_strip.length != self._cols:
+        if not self._blank_strip or self._blank_strip_cols != self._cols:
             self._blank_strip = Strip.blank(self._cols, Style(bgcolor=TERMINAL_BG))
+            self._blank_strip_cols = self._cols
         return self._blank_strip
 
     def _render_tick(self) -> None:
