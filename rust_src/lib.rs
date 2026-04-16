@@ -143,13 +143,14 @@ impl Screen {
             }
         } else if lines < old_lines {
             for _ in lines..old_lines {
-                if let Some(mut r) = self.buffer.pop_back() {
+                if let Some(r) = self.buffer.pop_back() {
                     if self.row_pool.len() < 500 { self.row_pool.push(r); }
                 }
             }
         }
+        let blank = self.blank_char();
         for row in self.buffer.iter_mut() {
-            row.resize(columns, self.blank_char());
+            row.resize(columns, blank);
         }
         if self.cursor.y >= lines {
             self.cursor.y = lines.saturating_sub(1);
@@ -658,7 +659,7 @@ impl Perform for Screen {
                         24 => self.current_style.underscore = false,
                         27 => self.current_style.inverse = false,
                         30..=37 => {
-                            self.current_style.fg = Color::Indexed(code - 30);
+                            self.current_style.fg = Color::Indexed((code - 30) as u8);
                         }
                         38 => {
                             if i + 2 < flat_params.len() && flat_params[i+1] == 5 {
@@ -671,7 +672,7 @@ impl Perform for Screen {
                         }
                         39 => self.current_style.fg = Color::Default,
                         40..=47 => {
-                            self.current_style.bg = Color::Indexed(code - 40);
+                            self.current_style.bg = Color::Indexed((code - 40) as u8);
                         }
                         48 => {
                             if i + 2 < flat_params.len() && flat_params[i+1] == 5 {
@@ -684,10 +685,10 @@ impl Perform for Screen {
                         }
                         49 => self.current_style.bg = Color::Default,
                         90..=97 => {
-                            self.current_style.fg = Color::Indexed(code - 90 + 8);
+                            self.current_style.fg = Color::Indexed((code - 90 + 8) as u8);
                         }
                         100..=107 => {
-                            self.current_style.bg = Color::Indexed(code - 100 + 8);
+                            self.current_style.bg = Color::Indexed((code - 100 + 8) as u8);
                         }
                         _ => {}
                     }
