@@ -52,7 +52,7 @@ def _get_256_color(n: int) -> str:
     return ""
 
 @lru_cache(maxsize=1024)
-def _get_rich_style(fg_tup: tuple, bg_tup: tuple, bold: bool, italics: bool, underscore: bool) -> Style:
+def _get_rich_style(fg_tup: tuple, bg_tup: tuple, bold: bool, italics: bool, underscore: bool, reverse: bool) -> Style:
     def _parse(tup, is_bg):
         t, v1, v2, v3 = tup
         if t == 1:
@@ -66,7 +66,8 @@ def _get_rich_style(fg_tup: tuple, bg_tup: tuple, bold: bool, italics: bool, und
         bgcolor=_parse(bg_tup, True),
         bold=bold,
         italic=italics,
-        underline=underscore
+        underline=underscore,
+        reverse=reverse
     )
 
 
@@ -200,10 +201,9 @@ class TerminalEmulator(Widget, can_focus=True):
 
         segs: list[Segment] = []
         for chunk, fg_tup, bg_tup, bold, italics, underscore, inverse, is_cursor in self._pyte_screen.get_line_segments(absolute_y):
-            if (is_cursor and self._cursor_visible and self._scroll_offset == 0) or inverse:
-                fg_tup, bg_tup = bg_tup, fg_tup
+            is_reversed = (is_cursor and self._cursor_visible and self._scroll_offset == 0) or inverse
             
-            style = _get_rich_style(fg_tup, bg_tup, bold, italics, underscore)
+            style = _get_rich_style(fg_tup, bg_tup, bold, italics, underscore, is_reversed)
             segs.append(Segment(chunk, style))
 
         return Strip(segs, self._cols)
