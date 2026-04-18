@@ -725,6 +725,7 @@ impl Perform for Screen {
                 self.delete_lines(n);
             }
             'r' => { // DECSTBM - Set Top and Bottom Margins
+                let old_y = self.cursor.y;
                 let top = std::cmp::max(1, get_param(0, 1)) as usize;
                 let mut bot = get_param(1, 0) as usize;
                 if bot == 0 { bot = self.lines; }
@@ -737,6 +738,8 @@ impl Perform for Screen {
                 }
                 self.cursor.x = 0;
                 self.cursor.y = 0;
+                self.mark_dirty(old_y);
+                self.mark_dirty(0);
             }
             'm' => { // SGR - Colors
                 if params.len() == 0 {

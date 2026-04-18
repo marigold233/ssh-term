@@ -99,9 +99,12 @@ class TerminalEmulator(Widget, can_focus=True):
 
     def _toggle_cursor(self) -> None:
         self._cursor_visible = not self._cursor_visible
-        # Only bother refreshing if we're on the live view where cursor matters
+        # Only refresh the cursor's row instead of the entire screen
         if self._scroll_offset == 0:
-            self.refresh()
+            with self._screen_lock:
+                cy = self._pyte_screen.cursor.y
+            if cy < self._rows:
+                self.refresh(Region(0, cy, self._cols, 1))
 
     @work
     async def _read_channel(self) -> None:
@@ -157,7 +160,8 @@ class TerminalEmulator(Widget, can_focus=True):
     @property
     def _max_scroll_offset(self) -> int:
         """Maximum lines user can scroll up (= total history lines)."""
-        total = self._pyte_screen.get_total_lines()
+        with self._screen_lock:
+            total = self._pyte_screen.get_total_lines()
         return max(0, total - self._rows)
 
     def _set_scroll_offset(self, value: int) -> None:
@@ -174,7 +178,8 @@ class TerminalEmulator(Widget, can_focus=True):
         y is 0..(_rows-1) relative to the widget viewport.
         We map it to an absolute line index into Rust's unified buffer.
         """
-        total = self._pyte_screen.get_total_lines()
+        with self._screen_lock:
+            total = self._pyte_screen.get_total_lines()
         # absolute_y: which line in the full (history + live) buffer to display
         # When _scroll_offset=0, we show the last _rows lines (the live terminal)
         # When _scroll_offset=N, we shift the window up by N lines
@@ -312,7 +317,9 @@ class TerminalEmulator(Widget, can_focus=True):
     def on_paste(self, event: Paste) -> None:
         """Handle paste events by sending the text into the terminal."""
         if event.text:
-            if getattr(self._pyte_screen, "bracketed_paste", False):
+            with self._screen_lock:
+                bp = getattr(self._pyte_screen, "bracketed_paste", False)
+            if bp:
                 self.write_stdin(f"\x1b[200~{event.text}\x1b[201~")
             else:
                 self.write_stdin(event.text)
@@ -335,13 +342,15 @@ class TerminalEmulator(Widget, can_focus=True):
         if cols != self._cols or rows != self._rows:
             self._cols = cols
             self._rows = rows
-            self._pyte_screen.resize(rows, cols)
+            with self._screen_lock:
+                self._pyte_screen.resize(rows, cols)
             try:
                 self.process.change_terminal_size(cols, rows)
             except Exception:
                 pass
             # Reset scroll on resize to avoid stale offsets
             self._scroll_offset = 0
+            self._full_redraw = True
 
     def stop(self) -> None:
         self._stop_process = True
