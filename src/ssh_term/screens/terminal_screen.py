@@ -43,18 +43,19 @@ class TerminalScreen(Screen):
     async def on_mount(self) -> None:
         err = get_color(self.app.theme, "error")
         # Start connection status
-        self.query_one("#term-status", Static).update(" Connecting...")
+        status = self.query_one("#term-status", Static)
+        status.update(" Connecting...")
         
         try:
             channel = await self.app.ssh_manager.open_shell(self.connection.id)
             emulator = TerminalEmulator(channel, id="terminal")
-            await self.mount(emulator)
+            await self.mount(emulator, before=status)
             emulator.focus()
         except Exception as e:
-            self.query_one("#term-status", Static).update(f" Error: {e}")
+            status.update(f" Error: {e}")
             return
 
-        self.query_one("#term-status", Static).update(
+        status.update(
             f" {self.connection.name} ({self.connection.host})  |  "
             f"[bold {err}]Ctrl+D[/] disconnect  "
             f"[bold {err}]Ctrl+F[/] files"

@@ -296,7 +296,6 @@ class TerminalEmulator(Widget, can_focus=True):
                     self._scroll_offset = 0
                     self._full_redraw = True
                     self.post_message(self.ScrollChanged(0, self._max_scroll_offset))
-                self._terminal_updated = True
             except Exception:
                 pass
 
@@ -310,7 +309,6 @@ class TerminalEmulator(Widget, can_focus=True):
                 self._scroll_offset = 0
                 self._full_redraw = True
                 self.post_message(self.ScrollChanged(0, self._max_scroll_offset))
-            self._terminal_updated = True
         except Exception as e:
             pass
 

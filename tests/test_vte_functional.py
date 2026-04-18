@@ -444,11 +444,14 @@ class TestDirtyLines(unittest.TestCase):
         """After clearing, only modified lines appear dirty."""
         s, st = _make(10, 5)
         s.get_and_clear_dirty_lines()
-        st.feed(s, "\x1b[3;1HX")   # modify row 2
+        st.feed(s, "\x1b[3;1HX")   # CUP to row 2, then print X
         dirty = s.get_and_clear_dirty_lines()
         self.assertIn(2, dirty)
-        # Row 0 should NOT be dirty
-        self.assertNotIn(0, dirty)
+        # Row 0 is also dirty because CUP marks the OLD cursor row dirty
+        self.assertIn(0, dirty)
+        # Rows not involved should NOT be dirty
+        self.assertNotIn(1, dirty)
+        self.assertNotIn(3, dirty)
 
 
 # ─── get_line_ansi Correctness ───────────────────────────────────────────────

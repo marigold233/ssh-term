@@ -439,7 +439,8 @@ class WorkspaceScreen(Screen):
 
         for offset in range(start, total):
             abs_y = max(0, total - term._rows - offset)
-            segments = term._pyte_screen.get_line_segments(abs_y)
+            with term._screen_lock:
+                segments = term._pyte_screen.get_line_segments(abs_y)
             line_text = "".join(seg[0] for seg in segments).strip()
             if line_text and pattern.search(line_text):
                 term._set_scroll_offset(offset)
