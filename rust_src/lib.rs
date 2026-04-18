@@ -518,10 +518,14 @@ impl Perform for Screen {
             }
             b'\r' => {
                 self.cursor.x = 0;
+                let cy = self.cursor.y;
+                self.mark_dirty(cy);
             }
             b'\x08' => {
                 if self.cursor.x > 0 {
                     self.cursor.x -= 1;
+                    let cy = self.cursor.y;
+                    self.mark_dirty(cy);
                 }
             }
             _ => {}
@@ -593,26 +597,42 @@ impl Perform for Screen {
                 }
             }
             'A' => { // Cursor Up
+                let old_y = self.cursor.y;
                 let n = get_param(0, 1) as usize;
                 self.cursor.y = self.cursor.y.saturating_sub(n);
+                self.mark_dirty(old_y);
+                let ny = self.cursor.y;
+                self.mark_dirty(ny);
             }
             'B' => { // Cursor Down
+                let old_y = self.cursor.y;
                 let n = get_param(0, 1) as usize;
                 self.cursor.y = std::cmp::min(self.lines.saturating_sub(1), self.cursor.y + n);
+                self.mark_dirty(old_y);
+                let ny = self.cursor.y;
+                self.mark_dirty(ny);
             }
             'C' => { // Cursor Forward
                 let n = get_param(0, 1) as usize;
                 self.cursor.x = std::cmp::min(self.columns.saturating_sub(1), self.cursor.x + n);
+                let cy = self.cursor.y;
+                self.mark_dirty(cy);
             }
             'D' => { // Cursor Back
                 let n = get_param(0, 1) as usize;
                 self.cursor.x = self.cursor.x.saturating_sub(n);
+                let cy = self.cursor.y;
+                self.mark_dirty(cy);
             }
             'H' | 'f' => { // Cursor Position
+                let old_y = self.cursor.y;
                 let r = std::cmp::max(1, get_param(0, 1)) as usize;
                 let c = std::cmp::max(1, get_param(1, 1)) as usize;
                 self.cursor.y = std::cmp::min(self.lines, r).saturating_sub(1);
                 self.cursor.x = std::cmp::min(self.columns, c).saturating_sub(1);
+                self.mark_dirty(old_y);
+                let ny = self.cursor.y;
+                self.mark_dirty(ny);
             }
             'J' => { // Erase in Display
                 let mode = get_param(0, 0);
@@ -627,10 +647,12 @@ impl Perform for Screen {
                             for x in cx..self.buffer[cy].len() {
                                 self.buffer[cy][x] = self.blank_char();
                             }
+                            self.mark_dirty(cy);
                             for y in (cy + 1)..self.buffer.len() {
                                 for x in 0..self.buffer[y].len() {
                                     self.buffer[y][x] = self.blank_char();
                                 }
+                                self.mark_dirty(y);
                             }
                         }
                     }
@@ -640,6 +662,7 @@ impl Perform for Screen {
                                 for x in 0..self.buffer[y].len() {
                                     self.buffer[y][x] = self.blank_char();
                                 }
+                                self.mark_dirty(y);
                             }
                         }
                         if cy < self.buffer.len() {
@@ -648,6 +671,7 @@ impl Perform for Screen {
                                     self.buffer[cy][x] = self.blank_char();
                                 }
                             }
+                            self.mark_dirty(cy);
                         }
                     }
                     2 | 3 => {
@@ -655,6 +679,7 @@ impl Perform for Screen {
                             for x in 0..self.buffer[y].len() {
                                 self.buffer[y][x] = self.blank_char();
                             }
+                            self.mark_dirty(y);
                         }
                     }
                     _ => {}
@@ -688,6 +713,7 @@ impl Perform for Screen {
                         }
                         _ => {}
                     }
+                    self.mark_dirty(cy);
                 }
             }
             'L' => { // IL - Insert Line

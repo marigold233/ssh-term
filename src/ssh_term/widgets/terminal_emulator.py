@@ -7,6 +7,7 @@ import asyncssh
 import ssh_term.rs_term as rs_term
 import queue
 import time
+import threading
 from rich.segment import Segment
 from rich.style import Style
 from rich.text import Text
@@ -56,6 +57,7 @@ class TerminalEmulator(Widget, can_focus=True):
         self._full_redraw = False
         self._terminal_updated = False
         self._data_queue = queue.Queue()
+        self._screen_lock = threading.Lock()
         self._blank_strip = None
         self._blank_strip_cols = -1
 
@@ -76,15 +78,17 @@ class TerminalEmulator(Widget, can_focus=True):
         if self._full_redraw:
             self._full_redraw = False
             self._terminal_updated = False
-            try: self._pyte_screen.get_and_clear_dirty_lines()
-            except Exception: pass
+            with self._screen_lock:
+                try: self._pyte_screen.get_and_clear_dirty_lines()
+                except Exception: pass
             self.refresh()
         elif self._terminal_updated:
             self._terminal_updated = False
-            try:
-                lines = self._pyte_screen.get_and_clear_dirty_lines()
-            except Exception:
-                lines = None  # fallback if Rust extension isn't recompiled yet
+            with self._screen_lock:
+                try:
+                    lines = self._pyte_screen.get_and_clear_dirty_lines()
+                except Exception:
+                    lines = None
             
             if self._scroll_offset != 0 or lines is None:
                 self.refresh()
@@ -135,7 +139,8 @@ class TerminalEmulator(Widget, can_focus=True):
                 # Feed in smaller fragments to yield GIL
                 chunk_size = 4096
                 for i in range(0, len(merged_data), chunk_size):
-                    self.stream.feed(self._pyte_screen, merged_data[i:i+chunk_size])
+                    with self._screen_lock:
+                        self.stream.feed(self._pyte_screen, merged_data[i:i+chunk_size])
                     time.sleep(0)
 
                 if self._scroll_offset <= 2:
@@ -179,12 +184,12 @@ class TerminalEmulator(Widget, can_focus=True):
         if absolute_y >= total or absolute_y < 0:
             return self.blank_strip
 
-        ansi_str = self._pyte_screen.get_line_ansi(absolute_y, self._cursor_visible, self._scroll_offset)
+        with self._screen_lock:
+            ansi_str = self._pyte_screen.get_line_ansi(absolute_y, self._cursor_visible, self._scroll_offset)
         if not ansi_str:
             return self.blank_strip
 
         parsed_text = Text.from_ansi(ansi_str)
-        # Leverage rich's powerful ANSI parser directly
         segs = list(self.app.console.render(parsed_text))
         return Strip(segs, self._cols)
 
