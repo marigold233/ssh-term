@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import asyncssh
 import ssh_term.rs_term as rs_term
+import queue
+import time
 from rich.segment import Segment
 from rich.style import Style
-from functools import lru_cache
+from rich.text import Text
 from textual import work
 from textual.widget import Widget
 from textual.strip import Strip
@@ -15,61 +17,6 @@ from textual.geometry import Region
 from textual.events import Key, Resize, Paste
 
 from ssh_term.theme import TERMINAL_FG, TERMINAL_BG, TERMINAL_ANSI
-
-
-_PYTE_COLOR_MAP = {
-    "black": TERMINAL_ANSI[0],
-    "red": TERMINAL_ANSI[1],
-    "green": TERMINAL_ANSI[2],
-    "brown": TERMINAL_ANSI[3],
-    "blue": TERMINAL_ANSI[4],
-    "magenta": TERMINAL_ANSI[5],
-    "cyan": TERMINAL_ANSI[6],
-    "white": TERMINAL_ANSI[7],
-    "brightblack": TERMINAL_ANSI[8],
-    "brightred": TERMINAL_ANSI[9],
-    "brightgreen": TERMINAL_ANSI[10],
-    "brightyellow": TERMINAL_ANSI[11],
-    "brightblue": TERMINAL_ANSI[12],
-    "brightmagenta": TERMINAL_ANSI[13],
-    "brightcyan": TERMINAL_ANSI[14],
-    "brightwhite": TERMINAL_ANSI[15],
-}
-
-
-def _get_256_color(n: int) -> str:
-    if n < 16:
-        return TERMINAL_ANSI[n]
-    if n < 232:
-        n -= 16
-        r = (n // 36) * 51
-        g = ((n // 6) % 6) * 51
-        b = (n % 6) * 51
-        return f"#{r:02x}{g:02x}{b:02x}"
-    if n < 256:
-        v = (n - 232) * 10 + 8
-        return f"#{v:02x}{v:02x}{v:02x}"
-    return ""
-
-@lru_cache(maxsize=1024)
-def _get_rich_style(fg_tup: tuple, bg_tup: tuple, bold: bool, italics: bool, underscore: bool, reverse: bool) -> Style:
-    def _parse(tup, is_bg):
-        t, v1, v2, v3 = tup
-        if t == 1:
-            return _get_256_color(v1)
-        elif t == 2:
-            return f"#{v1:02x}{v2:02x}{v3:02x}"
-        return TERMINAL_BG if is_bg else TERMINAL_FG
-
-    return Style(
-        color=_parse(fg_tup, False),
-        bgcolor=_parse(bg_tup, True),
-        bold=bold,
-        italic=italics,
-        underline=underscore,
-        reverse=reverse
-    )
-
 
 class TerminalEmulator(Widget, can_focus=True):
     DEFAULT_CSS = """
@@ -108,6 +55,7 @@ class TerminalEmulator(Widget, can_focus=True):
         self._scroll_offset = 0  # 0 = at bottom (live view), >0 = scrolled up N lines
         self._full_redraw = False
         self._terminal_updated = False
+        self._data_queue = queue.Queue()
         self._blank_strip = None
         self._blank_strip_cols = -1
 
@@ -115,6 +63,7 @@ class TerminalEmulator(Widget, can_focus=True):
         self.set_interval(0.5, self._toggle_cursor)
         self.set_interval(1 / 60, self._render_tick)
         self._read_channel()
+        self._vte_consumer()
 
     @property
     def blank_strip(self) -> Strip:
@@ -152,19 +101,50 @@ class TerminalEmulator(Widget, can_focus=True):
 
     @work
     async def _read_channel(self) -> None:
+        """Producer: Read from SSH connection asynchronously."""
         try:
             while not self._stop_process:
-                data = await self.process.stdout.read(4096)
+                # Read chunks up to 64KB for batched processing
+                data = await self.process.stdout.read(65536)
                 if not data:
                     break
-                self.stream.feed(self._pyte_screen, data)
-                # When new data arrives and user is at/near bottom, stay at bottom
-                if self._scroll_offset <= 2:
-                    self._scroll_offset = 0
-                self._terminal_updated = True
+                self._data_queue.put(data)
         except Exception:
             pass
         self._on_disconnect()
+
+    @work(thread=True)
+    def _vte_consumer(self) -> None:
+        """Consumer: Parse chunks with Rust VTE engine in a background thread."""
+        while not self._stop_process:
+            try:
+                # Wait for data with timeout so we reliably stop when necessary
+                data = self._data_queue.get(timeout=0.1)
+                
+                # Take all accumulated data at once (batching)
+                chunks = [data]
+                while True:
+                    try:
+                        more_data = self._data_queue.get_nowait()
+                        chunks.append(more_data)
+                    except queue.Empty:
+                        break
+                        
+                merged_data = "".join(chunks)
+                
+                # Feed in smaller fragments to yield GIL
+                chunk_size = 4096
+                for i in range(0, len(merged_data), chunk_size):
+                    self.stream.feed(self._pyte_screen, merged_data[i:i+chunk_size])
+                    time.sleep(0)
+
+                if self._scroll_offset <= 2:
+                    self._scroll_offset = 0
+                    
+                self._terminal_updated = True
+
+            except queue.Empty:
+                continue
 
     def _on_disconnect(self) -> None:
         self.post_message(self.Disconnected(self.id))
@@ -199,13 +179,13 @@ class TerminalEmulator(Widget, can_focus=True):
         if absolute_y >= total or absolute_y < 0:
             return self.blank_strip
 
-        segs: list[Segment] = []
-        for chunk, fg_tup, bg_tup, bold, italics, underscore, inverse, is_cursor in self._pyte_screen.get_line_segments(absolute_y):
-            is_reversed = (is_cursor and self._cursor_visible and self._scroll_offset == 0) or inverse
-            
-            style = _get_rich_style(fg_tup, bg_tup, bold, italics, underscore, is_reversed)
-            segs.append(Segment(chunk, style))
+        ansi_str = self._pyte_screen.get_line_ansi(absolute_y, self._cursor_visible, self._scroll_offset)
+        if not ansi_str:
+            return self.blank_strip
 
+        parsed_text = Text.from_ansi(ansi_str)
+        # Leverage rich's powerful ANSI parser directly
+        segs = list(self.app.console.render(parsed_text))
         return Strip(segs, self._cols)
 
     def on_key(self, event: Key) -> None:
@@ -291,9 +271,10 @@ class TerminalEmulator(Widget, can_focus=True):
         if key in key_map:
             data = key_map[key]
         elif key.startswith("ctrl+") and len(key) == 6:
-            ch = key[-1]
-            code = ord(ch.lower()) - ord("a") + 1
-            data = chr(code)
+            ch = key[-1].upper()
+            code = ord(ch) - 64
+            if 0 <= code <= 31:
+                data = chr(code)
         elif event.character:
             data = event.character
 

@@ -270,6 +270,86 @@ impl Screen {
         }
         segments
     }
+
+    #[pyo3(signature=(y, cursor_visible, scroll_offset))]
+    pub fn get_line_ansi(&self, y: usize, cursor_visible: bool, scroll_offset: usize) -> String {
+        let segments = self.get_line_segments(y);
+        let mut ansi = String::new();
+        
+        if segments.is_empty() {
+            return ansi;
+        }
+
+        let mut last_bold = false;
+        let mut last_italics = false;
+        let mut last_underscore = false;
+        let mut last_inverse = false;
+        let mut last_fg = (0, 0, 0, 0);
+        let mut last_bg = (0, 0, 0, 0);
+
+        ansi.push_str("\x1b[0m");
+
+        for (text, fg, bg, bold, italics, underscore, inverse, is_cursor) in segments {
+            let is_reversed = (is_cursor && cursor_visible && scroll_offset == 0) || inverse;
+            
+            let mut sgr = Vec::new();
+
+            if bold && !last_bold { sgr.push(String::from("1")); }
+            if !bold && last_bold { sgr.push(String::from("22")); }
+            
+            if italics && !last_italics { sgr.push(String::from("3")); }
+            if !italics && last_italics { sgr.push(String::from("23")); }
+
+            if underscore && !last_underscore { sgr.push(String::from("4")); }
+            if !underscore && last_underscore { sgr.push(String::from("24")); }
+
+            if is_reversed && !last_inverse { sgr.push(String::from("7")); }
+            if !is_reversed && last_inverse { sgr.push(String::from("27")); }
+
+            if fg != last_fg {
+                match fg.0 {
+                    1 => {
+                        let c = fg.1;
+                        if c < 8 { sgr.push(format!("{}", 30 + c)); }
+                        else if c < 16 { sgr.push(format!("{}", 90 + c - 8)); }
+                        else { sgr.push(format!("38;5;{}", c)); }
+                    },
+                    2 => sgr.push(format!("38;2;{};{};{}", fg.1, fg.2, fg.3)),
+                    _ => sgr.push(String::from("39")),
+                }
+            }
+            if bg != last_bg {
+                match bg.0 {
+                    1 => {
+                        let c = bg.1;
+                        if c < 8 { sgr.push(format!("{}", 40 + c)); }
+                        else if c < 16 { sgr.push(format!("{}", 100 + c - 8)); }
+                        else { sgr.push(format!("48;5;{}", c)); }
+                    },
+                    2 => sgr.push(format!("48;2;{};{};{}", bg.1, bg.2, bg.3)),
+                    _ => sgr.push(String::from("49")),
+                }
+            }
+
+            if !sgr.is_empty() {
+                ansi.push_str("\x1b[");
+                ansi.push_str(&sgr.join(";"));
+                ansi.push('m');
+            }
+
+            ansi.push_str(&text);
+
+            last_bold = bold;
+            last_italics = italics;
+            last_underscore = underscore;
+            last_inverse = is_reversed;
+            last_fg = fg;
+            last_bg = bg;
+        }
+
+        ansi.push_str("\x1b[0m");
+        ansi
+    }
 }
 
 impl Screen {
