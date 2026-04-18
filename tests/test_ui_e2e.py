@@ -98,6 +98,58 @@ class TestTerminalE2E(unittest.IsolatedAsyncioTestCase):
                 if hasattr(term, 'stop'):
                     term.stop()
 
+    async def test_complex_terminal_hotkeys_and_cursor_mapping(self):
+        """Test exhaustive mapped key translation like arrows, control modifiers, and F-keys."""
+        app = DummyTerminalApp()
+        
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            
+            term = None
+            for _ in range(20):
+                try:
+                    term = app.query_one(TerminalEmulator)
+                    break
+                except Exception:
+                    await pilot.pause(0.1)
+            self.assertIsNotNone(term)
+            
+            try:
+                # Test Cursor Movement Arrows (ANSI CSI Sequences)
+                await pilot.press("up", "down", "right", "left")
+                await pilot.pause()
+                app.mock_channel.stdin.write.assert_any_call("\x1b[A") # up
+                app.mock_channel.stdin.write.assert_any_call("\x1b[B") # down
+                app.mock_channel.stdin.write.assert_any_call("\x1b[C") # right
+                app.mock_channel.stdin.write.assert_any_call("\x1b[D") # left
+                
+                # Test Home and End
+                await pilot.press("home", "end")
+                await pilot.pause()
+                app.mock_channel.stdin.write.assert_any_call("\x1b[H") # home
+                app.mock_channel.stdin.write.assert_any_call("\x1b[F") # end
+                
+                # Test F-keys mapping
+                await pilot.press("f1", "f10")
+                await pilot.pause()
+                app.mock_channel.stdin.write.assert_any_call("\x1bOP") # f1
+                app.mock_channel.stdin.write.assert_any_call("\x1b[21~") # f10
+                
+                # Test Control characters (Control+A = 0x01, Control+C = 0x03)
+                await pilot.press("ctrl+a", "ctrl+c")
+                await pilot.pause()
+                app.mock_channel.stdin.write.assert_any_call(chr(1))
+                app.mock_channel.stdin.write.assert_any_call(chr(3))
+                
+                # Test editing keys
+                await pilot.press("backspace", "delete")
+                await pilot.pause()
+                app.mock_channel.stdin.write.assert_any_call("\x7f") # backspace
+                app.mock_channel.stdin.write.assert_any_call("\x1b[3~") # delete
+                
+            finally:
+                if hasattr(term, 'stop'):
+                    term.stop()
 
 if __name__ == "__main__":
     unittest.main()
